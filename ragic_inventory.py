@@ -2255,12 +2255,13 @@ OVER_BUFFER = 0.1
 SECONDS_PER_SPOT_15S = 15 * 4200  # 全省約 4200 店
 
 
-def build_daily_inventory_and_metrics(df_daily, year, month, today, emergency_days=EMERGENCY_DAYS, monthly_capacity_loader=None):
+def build_daily_inventory_and_metrics(df_daily, year, month, today, emergency_days=EMERGENCY_DAYS, monthly_capacity_loader=None, media_platform=None):
     """
     建構日粒度事實表與戰略指標。回傳 (daily_inventory DataFrame, metrics dict)。
     daily_inventory 欄位: date, total_capacity_seconds, used_seconds, unused_seconds, usage_rate, days_to_month_end, time_bucket
     metrics: past_wasted_seconds, emergency_unused_seconds, twwi, remaining_days, required_daily_seconds,
              under_risk, over_risk, strategy_state, emergency_dates, past_dates, buffer_dates
+    media_platform: 若指定則只計算該媒體；None 表示全媒體合計。
     """
     y, m = int(year), int(month)
     ndays = calendar.monthrange(y, m)[1]
@@ -2268,11 +2269,14 @@ def build_daily_inventory_and_metrics(df_daily, year, month, today, emergency_da
     if not monthly_capacity_loader:
         monthly_capacity_loader = lambda mp, yr, mo: get_platform_monthly_capacity(mp, yr, mo)
     daily_cap_total = 0
-    for mp in MEDIA_PLATFORM_OPTIONS:
+    platforms_to_sum = [media_platform] if media_platform else MEDIA_PLATFORM_OPTIONS
+    for mp in platforms_to_sum:
         cap = monthly_capacity_loader(mp, y, m)
         if cap is not None and cap > 0:
             daily_cap_total += int(cap)
     df = df_daily.copy()
+    if media_platform and '媒體平台' in df.columns:
+        df = df[df['媒體平台'] == media_platform]
     if df.empty or '日期' not in df.columns or '使用店秒' not in df.columns:
         used_by_date = {d: 0 for d in month_dates}
     else:
@@ -2343,11 +2347,13 @@ def build_daily_inventory_and_metrics(df_daily, year, month, today, emergency_da
     return daily_inventory, metrics
 
 
-def _seconds_to_spot_label(seconds, sec_per_spot=SECONDS_PER_SPOT_15S):
-    """轉譯為「約 X 檔全省 15 秒」"""
+def _seconds_to_spot_label(seconds, sec_per_spot=SECONDS_PER_SPOT_15S, short=False):
+    """轉譯為「約 X 檔全省 15 秒」；short=True 時改為「約 X 檔(15秒)」以適應狹窄版面。"""
     if sec_per_spot <= 0:
         return f"{int(seconds):,} 店秒"
     n = round(seconds / sec_per_spot)
+    if short:
+        return f"約 {n} 檔(15秒)"
     return f"約 {n} 檔全省 15 秒"
 
 
@@ -3963,12 +3969,12 @@ if df_daily.empty and not df_orders.empty:
         df_daily = _explode_segments_to_daily_cached(df_seg_main) if not df_seg_main.empty else pd.DataFrame()
 
 # --- 分頁呈現（角色導向入口 + 只渲染當前分頁）---
-TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI"]
-# 各角色可見分頁：行政主管=全部(預設)、業務=表1+表3(唯讀)、總經理=總結表圖表+表3+表2(不呈現表1)
+TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "📊 ROI", "🧪 實驗分頁"]
+# 各角色可見分頁：行政主管=全部(預設)、業務=表1+表3(唯讀)、總經理=總結表+表3+表2+分公司×媒體+ROI+實驗(不呈現表1、不呈現媒體秒數與採購)
 TAB_OPTIONS_BY_ROLE = {
     "行政主管": TAB_OPTIONS,  # 擁有所有權限，預設角色
     "業務": ["📋 表1-資料", "📊 表3-每日庫存"],
-    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI"],
+    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📊 ROI", "🧪 實驗分頁"],
 }
 
 st.markdown("#### 你現在的身份是？")
@@ -5231,6 +5237,8 @@ elif selected_tab == "📋 媒體秒數與採購":
     st.caption("儲存後，ROI 分頁將依「購買價格 ÷ 購買秒數」計算成本並產生投報率。")
 
 elif selected_tab == "🧪 實驗分頁":
+    # 鎖定分頁：切換「分析對象」等控件會觸發 rerun，避免跳到其他分頁
+    st.session_state["main_tab"] = "🧪 實驗分頁"
     st.markdown("### 🧪 依時間的庫存警示與分析（實驗）")
     with st.expander("📌 系統前提（核心假設）", expanded=True):
         st.markdown("""
@@ -5244,6 +5252,15 @@ elif selected_tab == "🧪 實驗分頁":
     exp_month = st.number_input("月份", min_value=1, max_value=12, value=today.month, key="exp_month")
     emergency_days = st.slider("緊急期天數（T0 可補救窗口）", min_value=3, max_value=14, value=EMERGENCY_DAYS, key="exp_emergency_days")
 
+    # 分析對象：全媒體合計 或 單一媒體平台
+    exp_scope_options = ["全媒體合計"] + list(MEDIA_PLATFORM_OPTIONS)
+    exp_scope = st.selectbox(
+        "**分析對象**（本頁所有指標與圖表皆依此對象計算）",
+        exp_scope_options,
+        key="exp_scope"
+    )
+    exp_media_filter = None if exp_scope == "全媒體合計" else exp_scope
+
     if not df_daily.empty and '使用店秒' in df_daily.columns:
         def _cap_loader(mp, y, mo):
             return get_platform_monthly_capacity(mp, y, mo)
@@ -5251,56 +5268,182 @@ elif selected_tab == "🧪 實驗分頁":
             df_daily, exp_year, exp_month, today,
             emergency_days=emergency_days,
             monthly_capacity_loader=_cap_loader,
+            media_platform=exp_media_filter,
         )
         month_cap = metrics["month_total_capacity"] or 1
         month_used = metrics["month_total_used"]
         past_wasted_pct = round(metrics["past_wasted_seconds"] / month_cap * 100, 1) if month_cap else 0
 
-        # === 區塊 A：本月浪費總覽（Hero KPIs）===
+        # 明確標示目前顯示的對象
         st.markdown("---")
+        st.info(f"📌 **目前顯示對象：{exp_scope}** — 以下浪費總覽、時間軸、救援壓力與戰略判斷皆為此對象。")
+        # === 區塊 A：本月浪費總覽（Hero KPIs）===
         st.markdown("#### 🔝 本月浪費總覽")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("本月已成浪費率（過去日）", f"{past_wasted_pct}%")
         with c2:
-            st.metric("已浪費秒數（Past）", _seconds_to_spot_label(metrics["past_wasted_seconds"]))
+            st.metric("已浪費秒數（Past）", _seconds_to_spot_label(metrics["past_wasted_seconds"], short=True))
         with c3:
-            st.metric("尚可救援秒數（Emergency）", _seconds_to_spot_label(metrics["emergency_unused_seconds"]))
-        st.caption(f"尚可救援 = 約 **{_seconds_to_spot_label(metrics['emergency_unused_seconds'])}** 未賣")
+            st.metric("尚可救援秒數（Emergency）", _seconds_to_spot_label(metrics["emergency_unused_seconds"], short=True))
+        st.caption(f"尚可救援 = **{_seconds_to_spot_label(metrics['emergency_unused_seconds'], short=True)}** 未賣（全省 15 秒檔）")
 
-        # === 區塊 B：時間價值條 ===
-        st.markdown("#### 🧠 時間價值條")
+        # === 區塊 B：時間價值條（視覺化）===
+        st.markdown("#### 🧠 時間軸與未售庫存視覺化")
         past_sec = daily_inv[daily_inv["time_bucket"] == "past"]["unused_seconds"].sum()
         em_sec = daily_inv[daily_inv["time_bucket"] == "emergency"]["unused_seconds"].sum()
         buf_sec = daily_inv[daily_inv["time_bucket"] == "buffer"]["unused_seconds"].sum()
-        total_sec = past_sec + em_sec + buf_sec or 1
-        p_past = past_sec / total_sec * 100
-        p_em = em_sec / total_sec * 100
-        p_buf = buf_sec / total_sec * 100
-        st.markdown(f"[🟥 Past 未售 {int(past_sec):,} 秒 | 不可逆 ] [ 🔴 Today ] [ 🟧 Emergency 未售 {int(em_sec):,} 秒 | 可救援 ] [ 🟩 Buffer 未售 {int(buf_sec):,} 秒 | 觀察 ] [ Month End ]")
-        st.caption("Past：已成浪費、不可逆｜Emergency：唯一可主動補救窗口｜Buffer：可等待調度")
+        total_unused = past_sec + em_sec + buf_sec or 1
+        p_past = past_sec / total_unused * 100
+        p_em = em_sec / total_unused * 100
+        p_buf = buf_sec / total_unused * 100
 
-        # === 區塊 C：救援壓力面板 ===
-        st.markdown("#### ⏱ 救援壓力面板")
+        # B1：本月「時間軸」橫條（依「月/日」呈現 Past / Emergency / Buffer，方便閱讀）
+        ndays = len(daily_inv)
+        timeline_rows = []
+        date_order_list = []
+        for _, row in daily_inv.iterrows():
+            d = row["date"]
+            date_label = f"{d.month}/{d.day}"
+            date_order_list.append(date_label)
+            bucket = row["time_bucket"]
+            label = "過去（浪費）" if bucket == "past" else ("緊急期（可救援）" if bucket == "emergency" else "緩衝期")
+            timeline_rows.append({"日期": date_label, "bucket": bucket, "label": label})
+        df_timeline = pd.DataFrame(timeline_rows)
+        try:
+            import altair as alt
+            today_label = f"{today.month}/{today.day}" if (today.year == exp_year and today.month == exp_month) else None
+            domain_bucket = ["past", "emergency", "buffer"]
+            range_bucket = ["#c0392b", "#e67e22", "#27ae60"]
+            chart_timeline = alt.Chart(df_timeline).mark_rect().encode(
+                x=alt.X("日期:N", title="日期（月/日）", sort=date_order_list, axis=alt.Axis(labelFontSize=9, titleFontSize=10)),
+                y=alt.value(0),
+                y2=alt.value(60),
+                color=alt.Color("bucket:N", title="區段", scale=alt.Scale(domain=domain_bucket, range=range_bucket), legend=alt.Legend(title="時間區段", labelFontSize=9, titleFontSize=10)),
+                tooltip=[alt.Tooltip("日期:N", title="日期"), alt.Tooltip("label:N", title="說明")]
+            ).properties(height=80, width=700, title=f"本月時間軸（{exp_month}月・左=月初 → 右=月底）")
+            if today_label and today_label in date_order_list:
+                rule_today = alt.Chart(pd.DataFrame([{"日期": today_label}])).mark_rule(color="white", strokeWidth=3).encode(x="日期:N")
+                chart_timeline = alt.layer(chart_timeline, rule_today)
+            st.altair_chart(chart_timeline, use_container_width=True)
+            st.caption("🔴 今日為白線｜紅=已過（浪費）｜橙=緊急期（可救援）｜綠=緩衝期")
+        except Exception:
+            st.markdown(f"[🟥 Past 未售 {int(past_sec):,} 秒 ] [ 🟧 Emergency {int(em_sec):,} 秒 ] [ 🟩 Buffer {int(buf_sec):,} 秒 ]")
+            st.caption("Past：已成浪費｜Emergency：可救援｜Buffer：可等待調度")
+
+        # B2：未售庫存「結構條」（依未售秒數比例，感受量與緊迫度）
+        try:
+            import altair as alt
+            df_bar = pd.DataFrame([
+                {"label_short": "過去浪費", "segment": "過去浪費（不可逆）", "秒數": int(past_sec), "pct": p_past, "order": 1},
+                {"label_short": "緊急期可救援", "segment": "緊急期未售（可救援）", "秒數": int(em_sec), "pct": p_em, "order": 2},
+                {"label_short": "緩衝期未售", "segment": "緩衝期未售", "秒數": int(buf_sec), "pct": p_buf, "order": 3},
+            ])
+            df_bar = df_bar[df_bar["秒數"] > 0]
+            if not df_bar.empty:
+                label_order = ["過去浪費", "緊急期可救援", "緩衝期未售"]
+                seg_range = ["#c0392b", "#e67e22", "#27ae60"]
+                chart_bar = alt.Chart(df_bar).mark_bar(size=36).encode(
+                    x=alt.X("pct:Q", title="佔未售比例（%）", scale=alt.Scale(domain=[0, 100])),
+                    y=alt.Y("label_short:N", title="", sort=label_order, axis=alt.Axis(labelLimit=0, labelPadding=10)),
+                    color=alt.Color("label_short:N", scale=alt.Scale(domain=label_order, range=seg_range), legend=None),
+                    tooltip=[alt.Tooltip("segment:N", title="區段"), alt.Tooltip("秒數:Q", title="未售店秒", format=","), alt.Tooltip("pct:Q", title="比例%", format=".1f")]
+                ).properties(height=180, title="未售庫存結構（可救援比例愈高愈需行動）").configure_axis(
+                    labelFontSize=12, labelLimit=0
+                )
+                st.altair_chart(chart_bar, use_container_width=True)
+        except Exception:
+            pass
+
+        # === 區塊 C：救援壓力面板（視覺化緊迫感）===
+        st.markdown("#### ⏱ 救援壓力與緊迫程度")
         rem = metrics["remaining_days"]
         req = metrics["required_daily_seconds"]
-        st.metric("剩餘緊急期天數", f"{rem} 天")
-        st.metric("尚未售出（緊急期內）", _seconds_to_spot_label(metrics["emergency_unused_seconds"]))
-        st.markdown("**每日需賣：**")
-        st.markdown(f"- ≈ **{int(req):,}** 店秒/日")
-        st.markdown(f"- ≈ **{_seconds_to_spot_label(req)}** / 日")
+        emergency_total_days = min(emergency_days, len([d for d in daily_inv["date"] if d >= today and d <= today + timedelta(days=emergency_days)])) or emergency_days
+        rem_ratio = rem / emergency_total_days if emergency_total_days else 0
+        daily_cap = (month_cap / ndays) if ndays else 1
+        req_vs_cap = min(1.0, (req / daily_cap)) if daily_cap else 0
 
-        # === 區塊 D：即時戰略判斷 ===
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("剩餘緊急期天數", f"{rem} 天")
+            st.progress(rem_ratio, text="緊急期剩餘時間" if rem_ratio <= 0.5 else "尚有緩衝")
+        with c2:
+            st.metric("尚未售出（緊急期內）", _seconds_to_spot_label(metrics["emergency_unused_seconds"], short=True))
+            emergency_unused_ratio = metrics["emergency_unused_seconds"] / month_cap if month_cap else 0
+            st.progress(min(1.0, emergency_unused_ratio), text="緊急期未售佔本月容量")
+        with c3:
+            st.metric("每日需賣", _seconds_to_spot_label(req, short=True))
+            st.progress(req_vs_cap, text="每日需賣 vs 日容量（愈滿愈吃緊）")
+
+        st.markdown("**每日需賣：** ≈ **{:,}** 店秒/日（{}）".format(int(req), _seconds_to_spot_label(req, short=True)))
+
+        # === 區塊 C2：剩餘日子可賣多少（視覺化 + 與建議呼應的數字）===
+        emergency_unused_sec = metrics["emergency_unused_seconds"]
+        total_sellable_label = _seconds_to_spot_label(emergency_unused_sec, short=True)
+        daily_target_label = _seconds_to_spot_label(req, short=True) if rem else "—"
+        st.markdown("#### 📅 剩餘日子可賣多少")
+        if rem > 0 and emergency_unused_sec > 0:
+            try:
+                import altair as alt
+                emergency_dates = metrics.get("emergency_dates") or []
+                target_per_day = req
+                rows = []
+                for d in sorted(emergency_dates):
+                    date_label = f"{d.month}/{d.day}" if hasattr(d, "month") else str(d)
+                    rows.append({"日期": date_label, "date_sort": d, "需賣": int(target_per_day), "需賣檔": round(target_per_day / SECONDS_PER_SPOT_15S, 1)})
+                if not rows:
+                    date_order = [today + timedelta(days=i) for i in range(rem)]
+                    rows = [{"日期": f"{d.month}/{d.day}", "date_sort": d, "需賣": int(target_per_day), "需賣檔": round(target_per_day / SECONDS_PER_SPOT_15S, 1)} for d in date_order]
+                df_days = pd.DataFrame(rows)
+                date_order_str = df_days["日期"].tolist()
+                chart_days = alt.Chart(df_days).mark_bar(color="#e67e22").encode(
+                    x=alt.X("日期:N", title="日期", sort=date_order_str),
+                    y=alt.Y("需賣:Q", title="店秒"),
+                    tooltip=[
+                        alt.Tooltip("日期:N", title="日期"),
+                        alt.Tooltip("需賣:Q", title="當日建議需賣(店秒)", format=","),
+                        alt.Tooltip("需賣檔:Q", title="約檔(15秒)", format=".1f")
+                    ]
+                ).properties(height=220, title=f"依日期・每日建議需賣 ≈ {daily_target_label}")
+                st.altair_chart(chart_days, use_container_width=True)
+            except Exception:
+                pass
+            st.markdown(f"**未來 {rem} 天**內可售總量 = **{total_sellable_label}**｜每日目標 ≈ **{daily_target_label}**（與下方行動建議一致）")
+        else:
+            st.caption("緊急期內無剩餘天數或無未售量，無需補救目標。")
+
+        # === 區塊 D：即時戰略判斷（視覺化狀態與風險）===
         st.markdown("#### 🚦 即時戰略判斷")
         state = metrics["strategy_state"]
         state_label = {"SELL": "強推補檔", "HOLD": "限制接案", "NORMAL": "正常銷售", "ANOMALY": "檢查假設"}[state]
-        st.markdown(f"**🎯 當前戰略狀態：{state}（{state_label}）**")
+        state_color = {"SELL": "#e74c3c", "HOLD": "#f39c12", "NORMAL": "#27ae60", "ANOMALY": "#9b59b6"}
+        state_bg = state_color.get(state, "#95a5a6")
+        st.markdown(
+            f'<div style="background:{state_bg};color:white;padding:12px 20px;border-radius:8px;font-size:1.1em;margin:8px 0;">'
+            f'🎯 當前戰略：<strong>{state}</strong> — {state_label}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
         under_high = metrics["under_risk"] >= 0.5
         over_high = metrics["over_risk"] >= 0.5
-        st.markdown("**原因：**")
-        st.markdown(f"- 浪費風險（未達目標使用率）：{'高' if under_high else '低'}")
-        st.markdown(f"- 爆量風險（超過安全上限）：{'高' if over_high else '低'}")
-        st.markdown(f"- 時間壓力：{'高' if rem <= 3 and metrics['emergency_unused_seconds'] > 0 else '中/低'}")
+        time_pressure_high = rem <= 3 and metrics["emergency_unused_seconds"] > 0
+        risk_waste = min(1.0, metrics["under_risk"])
+        risk_over = min(1.0, metrics["over_risk"])
+        risk_time = 1.0 if time_pressure_high else (0.5 if rem <= 5 and metrics["emergency_unused_seconds"] > 0 else 0.0)
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            st.caption("浪費風險（未達目標使用率）")
+            st.progress(risk_waste)
+            st.caption("高" if under_high else "低")
+        with r2:
+            st.caption("爆量風險（超過安全上限）")
+            st.progress(risk_over)
+            st.caption("高" if over_high else "低")
+        with r3:
+            st.caption("時間壓力（緊急期內未售）")
+            st.progress(risk_time)
+            st.caption("高" if time_pressure_high else "中/低")
 
         # === 區塊 E：行動建議 ===
         st.markdown("#### 📌 行動建議")
