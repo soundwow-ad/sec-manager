@@ -2351,17 +2351,11 @@ def _seconds_to_spot_label(seconds, sec_per_spot=SECONDS_PER_SPOT_15S):
     return f"約 {n} 檔全省 15 秒"
 
 
-# ========== ROI 實驗分頁：秒數投資效率（實驗性，不寫入資料庫）==========
-# 【核心前提】1. 當月未使用之秒數於月底視為 100% 浪費（不可逆）
-# 2. ROI 衡量的是「避免浪費的營運價值」，不是廣告成效
-# 3. 只有「原本會浪費的秒數被消化」才算 ROI 貢獻
-# 4. 本頁允許使用假設成本與簡化邏輯（實驗用途）
-# 5. 秒數成本若系統中不存在，允許使用者即時輸入作為模擬
-SYSTEM_MEDIA_COST_PER_SECOND = {
-    # 系統已知成本（若有）；可留空或只放部分媒體
-    # "全家新鮮視": 2.5,
-}
-STANDARD_VALUE_PER_SECOND = 3.0  # 估算「避免浪費的價值」
+# ========== ROI 分頁：依現有資料計算投報率（不寫入資料庫）==========
+# 成本：來自「媒體秒數與採購」分頁（購買價格）
+# 實收：來自表1 訂單（依各媒體使用秒數比例拆分，或使用拆分金額）
+# ROI = (實收 - 購買成本) / 購買成本
+SYSTEM_MEDIA_COST_PER_SECOND = {}
 
 
 def _compute_and_save_split_amount_for_contract(contract_key):
@@ -2449,123 +2443,34 @@ def get_revenue_per_media_allocated_by_seconds():
     return {k: int(round(v)) for k, v in revenue_per_media.items()}
 
 
-def _build_roi_mock_daily_inventory():
-    """Mock daily_inventory 供 ROI 實驗頁使用：2–3 媒體、10–20 天。"""
-    media_platforms = ['全家新鮮視', '全家廣播(企頻)', '家樂福超市']
-    base = datetime.now().replace(day=1).date()
-    days = 18
+def _calculate_roi_from_actual_data(year, month, revenue_per_media):
+    """
+    依現有資料計算各媒體 ROI。
+    成本：該媒體該年該月之購買價格（來自 platform_monthly_purchase）
+    實收：revenue_per_media（來自訂單，已依秒數比例或拆分金額分配）
+    ROI = (實收 - 購買成本) / 購買成本
+    回傳 list of dict，每項含：媒體, 購買秒數, 購買成本（元）, 實收金額（元）, ROI（投報率）
+    """
+    media_set = set(MEDIA_PLATFORM_OPTIONS)
+    for mp in revenue_per_media:
+        media_set.add(mp)
     rows = []
-    for d in range(days):
-        dt = base + timedelta(days=d)
-        if d < 5:
-            bucket = 'past'
-        elif d < 12:
-            bucket = 'emergency'
-        else:
-            bucket = 'buffer'
-        for mp in media_platforms:
-            cap = 80000 + (hash(mp) % 20000)
-            used = int(cap * (0.5 + 0.3 * (d % 5) / 5))
-            unused = max(0, cap - used)
-            usage_rate = (used / cap) if cap else 0
-            # 模擬實收金額：依使用秒數 × 模擬單價（約 2~4 元/秒，依媒體與日略變）
-            unit = 2.0 + (hash((d, mp)) % 80) / 40.0
-            amount_net = int(used * unit)
-            rows.append({
-                'date': dt,
-                'media_platform': mp,
-                'total_capacity_seconds': cap,
-                'used_seconds': used,
-                'unused_seconds': unused,
-                'usage_rate': usage_rate,
-                'time_bucket': bucket,
-                'amount_net': amount_net,
-            })
-    return pd.DataFrame(rows)
-
-
-def get_would_be_wasted_seconds(df):
-    """
-    各媒體「原本會浪費秒數」：past 全部視為浪費；emergency 的 unused_seconds 視為高機率浪費；buffer 不算。
-    回傳 dict: media_platform -> would_be_wasted_seconds
-    """
-    out = {}
-    for mp in df['media_platform'].unique():
-        sub = df[df['media_platform'] == mp]
-        past_waste = sub[sub['time_bucket'] == 'past']['unused_seconds'].sum()
-        emergency_waste = sub[sub['time_bucket'] == 'emergency']['unused_seconds'].sum()
-        out[mp] = int(past_waste + emergency_waste)
-    return out
-
-
-def simulate_absorbed_waste(media, invested_seconds, df):
-    """
-    模擬投資某媒體秒數後，可實際吸收多少浪費。吸收順序：先 emergency，再 past（僅計算，不可逆）。
-    吸收上限不超過 invested_seconds。回傳 absorbed_waste_seconds (int)。
-    """
-    sub = df[df['media_platform'] == media].copy()
-    sub = sub.sort_values('date')
-    remaining = int(invested_seconds)
-    absorbed = 0
-    for _, row in sub.iterrows():
-        if remaining <= 0:
-            break
-        if row['time_bucket'] == 'emergency':
-            take = min(remaining, int(row['unused_seconds']))
-            absorbed += take
-            remaining -= take
-        elif row['time_bucket'] == 'past':
-            take = min(remaining, int(row['unused_seconds']))
-            absorbed += take
-            remaining -= take
-    return int(absorbed)
-
-
-def calculate_roi(media, invested_seconds, cost_per_second, df, standard_value=STANDARD_VALUE_PER_SECOND, revenue_override=None):
-    """
-    計算 ROI 相關指標。注意除以 0 容錯。
-    投報率（ROI）以「實收金額」為主：(實收金額 - 投資成本) / 投資成本；若無實收則改以 WAV/成本。
-    revenue_override: 可選，若提供則直接作為該媒體之實收（用於「同一合約多媒體」時已依秒數比例分配之實收）。
-    回傳 dict: investment_cost, absorbed_waste_seconds, war, wav, revenue(實收金額), roi
-    """
-    if invested_seconds <= 0 or cost_per_second is None or cost_per_second <= 0:
-        return {
-            'investment_cost': 0,
-            'absorbed_waste_seconds': 0,
-            'war': 0.0,
-            'wav': 0.0,
-            'revenue': 0,
-            'roi': 0.0,
-        }
-    absorbed = simulate_absorbed_waste(media, invested_seconds, df)
-    investment_cost = invested_seconds * cost_per_second
-    war = (absorbed / invested_seconds) if invested_seconds else 0
-    wav = absorbed * standard_value
-    # 實收金額：優先使用已分配之 revenue_override（同一合約多媒體時依秒數比例拆分）；否則從 df 加總
-    revenue = 0
-    if revenue_override is not None:
-        revenue = int(revenue_override) if revenue_override else 0
-    elif not df.empty and 'media_platform' in df.columns:
-        rev_col = None
-        for c in ('amount_net', '實收金額'):
-            if c in df.columns:
-                rev_col = c
-                break
-        if rev_col is not None:
-            revenue = int(df.loc[df['media_platform'] == media, rev_col].sum())
-    # 投報率：優先 (實收 - 成本) / 成本；無實收時改以 wav / 成本
-    if revenue > 0 and investment_cost > 0:
-        roi = (revenue - investment_cost) / investment_cost
-    else:
-        roi = (wav / investment_cost) if investment_cost else 0
-    return {
-        'investment_cost': investment_cost,
-        'absorbed_waste_seconds': absorbed,
-        'war': war,
-        'wav': wav,
-        'revenue': revenue,
-        'roi': roi,
-    }
+    for mp in sorted(media_set):
+        row_data = get_platform_monthly_purchase(mp, year, month)
+        if row_data is None or not row_data[0] or row_data[0] <= 0:
+            continue  # 無採購資料則跳過
+        purchased_sec, purchase_price = row_data[0], row_data[1]
+        purchase_cost = float(purchase_price) if purchase_price else 0
+        revenue = int(revenue_per_media.get(mp, 0) or 0)
+        roi = ((revenue - purchase_cost) / purchase_cost) if purchase_cost > 0 else 0
+        rows.append({
+            "媒體": mp,
+            "購買秒數": int(purchased_sec),
+            "購買成本（元）": round(purchase_cost, 0),
+            "實收金額（元）": revenue,
+            "ROI（投報率）": round(roi, 2),
+        })
+    return rows
 
 
 def build_annual_seconds_summary(df_daily, year, monthly_capacity_loader=None):
@@ -2893,7 +2798,7 @@ def _build_visualization_summary_excel(annual_viz, summary_year):
                     chart_df_type_melted_sorted['累積起始'] + chart_df_type_melted_sorted['比例'] / 2
                 )
                 
-                bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar().encode(
+                bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar(size=38).encode(
                     x=alt.X('月份:O', title='月份'),
                     y=alt.Y('比例:Q', title='比例 (%)', 
                            axis=alt.Axis(format='.1f'),
@@ -3347,7 +3252,7 @@ def _build_visualization_summary_pdf(annual_viz, summary_year):
                     chart_df_type_melted_sorted['累積起始'] + chart_df_type_melted_sorted['比例'] / 2
                 )
                 
-                bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar().encode(
+                bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar(size=38).encode(
                     x=alt.X('月份:O', title='月份'),
                     y=alt.Y('比例:Q', title='比例 (%)', 
                            axis=alt.Axis(format='.1f'),
@@ -4058,12 +3963,12 @@ if df_daily.empty and not df_orders.empty:
         df_daily = _explode_segments_to_daily_cached(df_seg_main) if not df_seg_main.empty else pd.DataFrame()
 
 # --- 分頁呈現（角色導向入口 + 只渲染當前分頁）---
-TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI 實驗"]
+TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI"]
 # 各角色可見分頁：行政主管=全部(預設)、業務=表1+表3(唯讀)、總經理=總結表圖表+表3+表2(不呈現表1)
 TAB_OPTIONS_BY_ROLE = {
     "行政主管": TAB_OPTIONS,  # 擁有所有權限，預設角色
     "業務": ["📋 表1-資料", "📊 表3-每日庫存"],
-    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI 實驗"],
+    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "🧪 實驗分頁", "📊 ROI"],
 }
 
 st.markdown("#### 你現在的身份是？")
@@ -4834,7 +4739,7 @@ elif selected_tab == "📉 總結表圖表":
                     
                     # 創建堆疊長條圖（使用百分比數據直接堆疊）
                     # 因為數據已經是百分比（0-100），使用 stack=True 啟用堆疊
-                    bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar().encode(
+                    bar_chart = alt.Chart(chart_df_type_melted_sorted).mark_bar(size=38).encode(
                         x=alt.X('月份:O', title='月份'),
                         y=alt.Y('比例:Q', title='比例 (%)', 
                                axis=alt.Axis(format='.1f'),
@@ -5097,7 +5002,19 @@ elif selected_tab == "📊 分公司×媒體 每月秒數":
             st.markdown("---")
             st.markdown("#### ① 各分公司 × 媒體平台 — 總秒數堆疊圖")
             st.caption("每根長條為一分公司，各段為各媒體使用總秒數（堆疊為實際秒數，非占比）。")
-            st.bar_chart(pivot_t)
+            try:
+                import altair as alt
+                cols = pivot_t.reset_index().columns.tolist()
+                melt_t = pivot_t.reset_index().melt(id_vars=[cols[0]], var_name="媒體", value_name="秒數").rename(columns={cols[0]: "分公司"})
+                chart1 = alt.Chart(melt_t).mark_bar(size=38).encode(
+                    x=alt.X("分公司:N", title="分公司"),
+                    y=alt.Y("秒數:Q", title="秒數"),
+                    color=alt.Color("媒體:N", title="媒體"),
+                    tooltip=["分公司", "媒體", alt.Tooltip("秒數:Q", format=",.0f")]
+                ).properties(width=700, height=400)
+                st.altair_chart(chart1, use_container_width=True)
+            except ImportError:
+                st.bar_chart(pivot_t)
             st.dataframe(_styler_one_decimal(pivot_t.reset_index()), use_container_width=True, height=min(220, 80 + len(pivot_t) * 36))
 
             st.markdown("---")
@@ -5109,7 +5026,21 @@ elif selected_tab == "📊 分公司×媒體 每月秒數":
             for co in companies_avail:
                 for mp in media_avail:
                     df_bars.loc[f"{co}-{mp}", mp] = float(pivot_t.loc[co, mp]) if co in pivot_t.index and mp in pivot_t.columns else 0.0
-            st.bar_chart(df_bars)
+            try:
+                import altair as alt
+                melt_bars = df_bars.reset_index().melt(id_vars=["index"], var_name="媒體", value_name="秒數").rename(columns={"index": "分公司-平台"})
+                if not melt_bars.empty:
+                    chart2 = alt.Chart(melt_bars).mark_bar(size=38).encode(
+                        x=alt.X("分公司-平台:N", title="分公司-平台", sort=bar_labels),
+                        y=alt.Y("秒數:Q", title="秒數"),
+                        color=alt.Color("媒體:N", title="媒體"),
+                        tooltip=["分公司-平台", "媒體", alt.Tooltip("秒數:Q", format=",.0f")]
+                    ).properties(width=700, height=400)
+                    st.altair_chart(chart2, use_container_width=True)
+                else:
+                    st.bar_chart(df_bars)
+            except ImportError:
+                st.bar_chart(df_bars)
             st.dataframe(_styler_one_decimal(pivot_t.reset_index()), use_container_width=True, height=min(220, 80 + len(pivot_t) * 36))
 
             st.markdown("---")
@@ -5156,7 +5087,7 @@ elif selected_tab == "📊 分公司×媒體 每月秒數":
             pct_display = pct_t.reset_index()
             def _balance_color(row):
                 return ["" if c == "公司" else _cell_balance_style(row.get(c)) for c in pct_display.columns]
-            st.dataframe(pct_display.style.format({c: "{:,.1f}" for c in media_avail if c in pct_display.columns}).apply(_balance_color, axis=1), use_container_width=True, height=min(280, 80 + len(pct_display) * 36))
+            st.dataframe(pct_display.style.format({c: "{:,.1f}%" for c in media_avail if c in pct_display.columns}).apply(_balance_color, axis=1), use_container_width=True, height=min(280, 80 + len(pct_display) * 36))
 
             st.markdown("---")
             st.markdown("#### ⑤ 年度 vs 月份趨勢 — 小 multiples 折線圖")
@@ -5241,7 +5172,7 @@ elif selected_tab == "📊 分公司×媒體 每月秒數":
 
 elif selected_tab == "📋 媒體秒數與採購":
     st.markdown("### 📋 媒體秒數與採購")
-    st.caption("輸入各媒體平台「一年 12 個月」的購買秒數與購買價格；儲存後會同步更新表3 的當月每日可用秒數，並供 ROI 實驗分頁換算成本。")
+    st.caption("輸入各媒體平台「一年 12 個月」的購買秒數與購買價格；儲存後會同步更新表3 的當月每日可用秒數，並供 ROI 分頁計算成本。")
     purchase_year = st.number_input("年度", min_value=2020, max_value=2030, value=datetime.now().year, key="purchase_year")
     if st.button("🎲 產生模擬採購資料（測試用）", type="secondary", key="gen_mock_purchase", help="為上述年度、所有媒體產生 1～12 月合理模擬數據，方便測試表3 與 ROI 分頁"):
         with st.spinner("正在產生模擬採購資料..."):
@@ -5297,7 +5228,7 @@ elif selected_tab == "📋 媒體秒數與採購":
             st.success(f"已儲存 {mp} {purchase_year} 年 1~12 月資料（並已同步表3 每日可用秒數）。")
             st.rerun()
     st.markdown("---")
-    st.caption("儲存後，ROI 實驗分頁將依「購買價格 ÷ 購買秒數」自動換算每秒成本，無需再手動設定成本。")
+    st.caption("儲存後，ROI 分頁將依「購買價格 ÷ 購買秒數」計算成本並產生投報率。")
 
 elif selected_tab == "🧪 實驗分頁":
     st.markdown("### 🧪 依時間的庫存警示與分析（實驗）")
@@ -5395,106 +5326,49 @@ elif selected_tab == "🧪 實驗分頁":
     else:
         st.warning("📭 尚無每日資料，請先產生模擬資料。")
 
-elif selected_tab == "📊 ROI 實驗":
-    # ROI 實驗分頁：秒數投資效率；成本由「媒體秒數與採購」分頁的購買價格÷購買秒數換算，無需手動設成本
-    st.markdown("### 📊 ROI 實驗分頁（秒數投資效率）")
-    st.caption("成本由「📋 媒體秒數與採購」分頁的購買價格 ÷ 購買秒數自動換算；本頁使用模擬 daily_inventory，不寫入資料庫。")
-    with st.expander("📌 核心前提", expanded=True):
-        st.markdown("""
-1. 當月未使用之秒數於月底視為 **100% 浪費（不可逆）**
-2. ROI 衡量的是「**避免浪費的營運價值**」，不是廣告成效
-3. 只有「原本會浪費的秒數被消化」才算 ROI 貢獻
-4. 本頁為實驗用途；**每秒成本 = 該月購買價格 ÷ 該月購買秒數**（來自媒體秒數與採購分頁）
-5. **同一筆合約若有多媒體平台**：實收金額依「各媒體使用秒數佔該合約總秒數比例」拆分到各媒體，再算各媒體 ROI（可勾選下方「使用表1/訂單資料計算實收」套用）
-        """)
-    roi_year = st.number_input("ROI 參考年度（用於取採購成本）", min_value=2020, max_value=2030, value=datetime.now().year, key="roi_year")
-    roi_month = st.number_input("ROI 參考月份（用於取採購成本）", min_value=1, max_value=12, value=datetime.now().month, key="roi_month")
-    use_table1_revenue = st.checkbox(
-        "使用表1/訂單資料計算實收（同一合約多媒體時依各媒體使用秒數比例拆分到各媒體）",
-        value=False,
-        key="roi_use_table1_revenue",
-    )
-    revenue_per_media = {}
-    if use_table1_revenue:
-        revenue_per_media = get_revenue_per_media_allocated_by_seconds()
-        if revenue_per_media:
-            st.caption(f"已從訂單＋檔次段依秒數比例分配實收，共 {len(revenue_per_media)} 個媒體有資料。")
-        else:
-            st.caption("尚無訂單或檔次段資料，實收將以模擬資料或 WAV 計算。")
-    df_roi = _build_roi_mock_daily_inventory()
-    would_be_wasted = get_would_be_wasted_seconds(df_roi)
-    total_rescuable = sum(would_be_wasted.values())
+elif selected_tab == "📊 ROI":
+    st.markdown("### 📊 ROI 投報分析")
+    st.caption("依現有採購與訂單資料計算各媒體之投報率，不涉及模擬或預測。")
 
-    # 成本來源：採購資料換算；若無則 fallback 實驗輸入
-    if "roi_media_cost" not in st.session_state:
-        st.session_state["roi_media_cost"] = {}
-    media_list = sorted(df_roi["media_platform"].unique().tolist())
+    st.markdown("---")
+    st.markdown("#### 資料來源說明")
+    st.markdown("""
+| 項目 | 來源 |
+|------|------|
+| **購買成本** | 「📋 媒體秒數與採購」分頁的該年該月購買價格 |
+| **實收金額** | 表1 訂單；同一合約多媒體時依各媒體使用秒數比例拆分，或使用拆分金額 |
+| **ROI** | (實收 - 購買成本) ÷ 購買成本 |
+""")
+    st.markdown("---")
 
-    def get_cost_for_media(media):
-        row = get_platform_monthly_purchase(media, roi_year, roi_month)
-        if row is not None and row[0] and row[0] > 0:
-            return row[1] / row[0]
-        if media in SYSTEM_MEDIA_COST_PER_SECOND:
-            return SYSTEM_MEDIA_COST_PER_SECOND[media]
-        return st.session_state.get("roi_media_cost", {}).get(media, 2.0)
+    roi_year = st.number_input("參考年度", min_value=2020, max_value=2030, value=datetime.now().year, key="roi_year")
+    roi_month = st.number_input("參考月份", min_value=1, max_value=12, value=datetime.now().month, key="roi_month")
 
-    with st.expander("📌 成本來源說明（可補填無採購資料的媒體）", expanded=False):
-        st.caption("優先使用「媒體秒數與採購」分頁的該年該月資料：每秒成本 = 購買價格 ÷ 購買秒數。若某媒體尚無採購資料，可於下方補填每秒成本（僅本頁 session）。")
-        for mp in media_list:
-            row = get_platform_monthly_purchase(mp, roi_year, roi_month)
-            if row is not None and row[0] and row[0] > 0:
-                cost = row[1] / row[0]
-                st.caption(f"**{mp}**：採購換算 = {row[1]:,.0f} 元 ÷ {row[0]:,} 秒 ≈ **{cost:.1f} 元/秒**")
-            else:
-                val = st.number_input(f"{mp} 每秒成本（元，補填）", min_value=0.1, max_value=20.0, value=float(st.session_state["roi_media_cost"].get(mp, 2.0)), step=0.1, key=f"roi_cost_{mp}")
-                st.session_state["roi_media_cost"][mp] = val
-                st.caption(f"**{mp}**：實驗補填 = {val} 元/秒")
+    revenue_per_media = get_revenue_per_media_allocated_by_seconds()
+    if not revenue_per_media:
+        st.info("尚無訂單或檔次段資料，實收金額將為 0。請先於表1 建立訂單並產生檔次段。")
+        revenue_per_media = {}
 
-    # 區塊 C：媒體別 ROI 實驗表
-    st.markdown("#### 🧠 媒體別 ROI 實驗表")
-    roi_rows = []
-    invest_sliders = {}
-    for mp in media_list:
-        default_invest = 90000
-        invest = st.slider(
-            f"{mp} 投資秒數",
-            min_value=30000,
-            max_value=150000,
-            value=default_invest,
-            step=5000,
-            key=f"roi_invest_{mp}",
-        )
-        invest_sliders[mp] = invest
-        cost_per_sec = get_cost_for_media(mp)
-        rev_override = revenue_per_media.get(mp) if use_table1_revenue and revenue_per_media else None
-        res = calculate_roi(mp, invest, cost_per_sec, df_roi, revenue_override=rev_override)
-        roi_rows.append({
-            "媒體": mp,
-            "使用成本（元/秒）": cost_per_sec,
-            "投資成本（元）": round(res["investment_cost"], 0),
-            "實收金額（元）": res["revenue"],
-            "吸收浪費秒數": res["absorbed_waste_seconds"],
-            "WAR": round(res["war"], 1),
-            "ROI（投報率）": round(res["roi"], 1),
-        })
-    roi_df = pd.DataFrame(roi_rows)
-    st.dataframe(_styler_one_decimal(roi_df), use_container_width=True, height=180)
+    roi_rows = _calculate_roi_from_actual_data(roi_year, roi_month, revenue_per_media)
 
-    # 區塊 D：ROI 視覺化（Bar chart）
-    st.markdown("#### 📊 ROI 視覺化")
-    st.bar_chart(roi_df.set_index("媒體")["ROI（投報率）"])
+    if not roi_rows:
+        st.warning("尚無採購資料。請至「📋 媒體秒數與採購」分頁輸入該年該月的購買秒數與購買價格。")
+    else:
+        roi_df = pd.DataFrame(roi_rows)
+        st.markdown("#### 媒體別 ROI 表")
+        st.dataframe(_styler_one_decimal(roi_df), use_container_width=True, height=min(220, 80 + len(roi_rows) * 42))
 
-    # 區塊 E：系統建議（rule-based，依 ROI 排序）
-    st.markdown("#### 🚦 系統建議")
-    sorted_rows = sorted(roi_rows, key=lambda x: x["ROI（投報率）"], reverse=True)
-    for r in sorted_rows:
-        roi_val = r["ROI（投報率）"]
-        if roi_val >= 2.0:
-            rec = "優先投資"
-        elif roi_val >= 1.0:
-            rec = "可接受"
-        else:
-            rec = "不建議"
-        st.markdown(f"- **{r['媒體']}**（ROI = {round(roi_val, 1)}）→ **{rec}**")
+        st.markdown("#### ROI 視覺化")
+        try:
+            import altair as alt
+            roi_chart_df = roi_df[["媒體", "ROI（投報率）"]].copy()
+            chart_roi = alt.Chart(roi_chart_df).mark_bar(size=38).encode(
+                x=alt.X("媒體:N", title="媒體"),
+                y=alt.Y("ROI（投報率）:Q", title="ROI"),
+                tooltip=["媒體", alt.Tooltip("ROI（投報率）:Q", format=".1f")]
+            ).properties(width=700, height=400)
+            st.altair_chart(chart_roi, use_container_width=True)
+        except ImportError:
+            st.bar_chart(roi_df.set_index("媒體")["ROI（投報率）"])
 
 # （檔次稽核、檔次拆解表 已移除）
