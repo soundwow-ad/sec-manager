@@ -30,9 +30,16 @@ def _get_sheet_config() -> dict[str, Any]:
         import streamlit as st
         secrets = getattr(st, "secrets", None)
         if secrets and hasattr(secrets, "get"):
-            gs = secrets.get("google_sheet") or {}
-            if isinstance(gs, dict) and (gs.get("sheet_id") or gs.get("sheet_id_")):
-                return dict(gs)
+            # 支援 google_sheet 或 Google_Sheet（Cloud 有時會改 key 名稱）
+            gs = secrets.get("google_sheet") or secrets.get("Google_Sheet") or {}
+            if isinstance(gs, dict):
+                # 有 sheet_id 才當成有效區塊；若沒有則仍可從環境變數補
+                sid = gs.get("sheet_id") or gs.get("sheet_id_")
+                if sid or os.environ.get("GOOGLE_SHEET_ID"):
+                    out = dict(gs)
+                    if not sid and os.environ.get("GOOGLE_SHEET_ID"):
+                        out["sheet_id"] = os.environ["GOOGLE_SHEET_ID"]
+                    return out
     except Exception:
         pass
     out = {}
@@ -50,7 +57,8 @@ def _get_credentials():
     """取得 Google API 憑證（服務帳戶）。"""
     try:
         import streamlit as st
-        gs = (st.secrets.get("google_sheet") or {}) if hasattr(st, "secrets") and st.secrets else {}
+        raw_gs = (st.secrets.get("google_sheet") or st.secrets.get("Google_Sheet")) if hasattr(st, "secrets") and st.secrets else None
+        gs = dict(raw_gs) if isinstance(raw_gs, dict) else {}
     except Exception:
         gs = {}
     cred_dict = gs.get("credentials")
@@ -68,10 +76,14 @@ def _get_credentials():
             cred_dict = raw
         from google.oauth2 import service_account
         return service_account.Credentials.from_service_account_info(cred_dict)
-    # 個別欄位（方便在 TOML 裡填）
-    client_email = gs.get("client_email") or os.environ.get("GOOGLE_SHEET_CLIENT_EMAIL")
-    private_key = (gs.get("private_key") or os.environ.get("GOOGLE_SHEET_PRIVATE_KEY") or "").replace("\\n", "\n")
-    if client_email and private_key:
+    # 個別欄位（方便在 TOML 裡填；Cloud 多行 private_key 易出錯，建議改用 credentials_json）
+    client_email = (gs.get("client_email") or os.environ.get("GOOGLE_SHEET_CLIENT_EMAIL") or "").strip()
+    raw_key = gs.get("private_key") or os.environ.get("GOOGLE_SHEET_PRIVATE_KEY") or ""
+    if isinstance(raw_key, str):
+        private_key = raw_key.strip().replace("\\n", "\n")
+    else:
+        private_key = ""
+    if client_email and private_key and "BEGIN PRIVATE KEY" in private_key:
         from google.oauth2 import service_account
         return service_account.Credentials.from_service_account_info({
             "type": "service_account",
@@ -90,13 +102,24 @@ def _get_credentials():
 
 def is_sheets_enabled() -> bool:
     """是否已設定並啟用 Google Sheet 後端。"""
+    return get_sheets_status()[0] == "ok"
+
+
+def get_sheets_status() -> tuple[str, str | None]:
+    """
+    回傳 ("ok", None) 表示已啟用；否則 ("disabled", "原因")。
+    供 UI 顯示未設定時的原因（例如：未填 sheet_id、憑證無法載入）。
+    """
     config = _get_sheet_config()
-    sheet_id = config.get("sheet_id") or config.get("sheet_id_")
-    if not sheet_id or not str(sheet_id).strip():
-        return False
+    sheet_id = (config.get("sheet_id") or config.get("sheet_id_") or "").strip()
+    if not sheet_id:
+        return "disabled", "未填 sheet_id（請在 Secrets 設定 [google_sheet] 的 sheet_id）"
     if config.get("enabled") is False:
-        return False
-    return _get_credentials() is not None
+        return "disabled", "已關閉（enabled = false）"
+    creds = _get_credentials()
+    if creds is None:
+        return "disabled", "憑證無法載入（請檢查 client_email / private_key，或改用 credentials_json 單行 JSON）"
+    return "ok", None
 
 
 def _get_sheet_id() -> str | None:

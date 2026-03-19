@@ -4822,10 +4822,12 @@ st.sidebar.caption(f"👤 {user['username']}（{role}）")
 
 # Google Sheet 資料庫狀態（若已設定則顯示還原結果與手動同步）
 try:
-    from sheets_backend import is_sheets_enabled
+    from sheets_backend import is_sheets_enabled, get_sheets_status
     _sheets_on = is_sheets_enabled()
+    _sheets_status, _sheets_reason = get_sheets_status()
 except Exception:
     _sheets_on = False
+    _sheets_status, _sheets_reason = "disabled", "無法載入設定"
 if _sheets_on:
     load_errs = st.session_state.get("_sheets_load_errors")
     if load_errs:
@@ -4840,7 +4842,9 @@ if _sheets_on:
             st.sidebar.success("已同步")
         st.rerun()
 else:
-    st.sidebar.caption("📄 未設定 Google Sheet（可於 .streamlit/secrets.toml 設定）")
+    st.sidebar.caption("📄 未設定 Google Sheet（可於 .streamlit/secrets.toml 或 Cloud Secrets 設定）")
+    if _sheets_reason:
+        st.sidebar.caption(f"原因：{_sheets_reason}")
 
 if st.sidebar.button("🚪 登出", key="btn_logout"):
     del st.session_state['user']
