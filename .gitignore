@@ -28,6 +28,7 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/secrets_for_streamlit_cloud.txt
 
 # Database
 *.db
