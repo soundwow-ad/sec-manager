@@ -159,6 +159,12 @@ def render_table1_tab(
                 if col not in df_seg_editor.columns:
                     df_seg_editor[col] = ""
 
+            # 批次更新後為了避免「只顯示尚未填寫」把剛更新完的 rows 全過濾掉，
+            # 在建立 checkbox 之前先把它切回 False（避免 Streamlit widget key 被程式覆寫例外）。
+            if st.session_state.get("_seg_force_show_all", False):
+                st.session_state["seg_missing_only"] = False
+                st.session_state["_seg_force_show_all"] = False
+
             only_missing = st.checkbox("只顯示尚未填寫 seconds_type", value=True, key="seg_missing_only")
             kw = st.text_input("關鍵字（segment_id / 公司 / 客戶 / 平台）", value="", key="seg_edit_kw").strip().lower()
 
@@ -282,10 +288,8 @@ def render_table1_tab(
                         st.error("Google Sheet 同步失敗：" + "; ".join(errs[:5]))
                 if "_table1_cache_key" in st.session_state:
                     del st.session_state["_table1_cache_key"]
-                # 更新後若仍維持「只顯示尚未填寫」，剛更新的 rows 會立刻被過濾掉，看起來像「全部消失」。
-                # 所以在成功更新後自動切換回顯示全部，讓你能立刻確認更新結果。
-                if only_missing:
-                    st.session_state["seg_missing_only"] = False
+                # 下一輪 rerun 前先設定旗標；在 checkbox 建立之前切回 False。
+                st.session_state["_seg_force_show_all"] = True
                 st.success(f"✅ 已批次更新 {len(seg_id_selected_list)} 筆 segments 的 seconds_type。")
                 st.rerun()
 
