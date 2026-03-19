@@ -1041,7 +1041,12 @@ def parse_cueapp_excel(file_content):
                         return int(v.day)
                     except Exception:
                         return None
-                if isinstance(v, (int, float)) and not pd.isna(v):
+                try:
+                    import numbers as _numbers
+                    is_num = isinstance(v, (_numbers.Integral, _numbers.Real))
+                except Exception:
+                    is_num = isinstance(v, (int, float))
+                if is_num and not pd.isna(v):
                     try:
                         n = int(round(float(v)))
                         return n if 1 <= n <= 31 else None
