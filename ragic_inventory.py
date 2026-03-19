@@ -176,7 +176,8 @@ def _ragic_extract_entries(payload: dict) -> list[dict]:
     for k, entry in payload.items():
         if not isinstance(entry, dict):
             continue
-        if entry.get("_ragicId") is None:
+        # listing 可能沒有 _ragicId，或回空字串；用 dict key 當作 rid
+        if not entry.get("_ragicId"):
             # listing 可能只以 key 表示 record id
             try:
                 entry["_ragicId"] = int(k) if str(k).isdigit() else k
@@ -6204,6 +6205,14 @@ elif selected_tab == "🧪 Ragic抓取測試":
                 _log("payload 前 3 個 key/value type=" + ", ".join([f"{str(k)[:30]}:{type(v).__name__}" for k, v in sample_items]))
             except Exception as e:
                 _log(f"取樣 payload 失敗：{e}")
+            # 直接顯示一筆原始回傳（避免只看 log）
+            try:
+                st.markdown("#### 🔎 API 原始回傳（前 1 筆）")
+                k0 = next(iter(payload.keys()), None)
+                if k0 is not None:
+                    st.json({str(k0): payload.get(k0)})
+            except Exception:
+                pass
         entries = _ragic_extract_entries(payload)
         _log(f"entries count={len(entries)}")
         try:
@@ -6227,6 +6236,13 @@ elif selected_tab == "🧪 Ragic抓取測試":
         # 檢查 _ragicId 有無
         if "_ragicId" in df.columns:
             _log(f"_ragicId notna count={int(df['_ragicId'].notna().sum())}")
+            try:
+                _log(f\"_ragicId sample(head 5)={df['_ragicId'].head(5).tolist()}\")
+            except Exception:
+                pass
+        # 額外顯示 df 前幾列，確認為何看起來是空
+        st.markdown("#### 🔎 解析後表格（前 5 列）")
+        st.dataframe(df.head(5), use_container_width=True, hide_index=True)
 
         # 本機日期篩選
         if filter_field != "不篩" and (date_from or date_to):
