@@ -6076,6 +6076,17 @@ elif selected_tab == "🧪 Ragic抓取測試":
     st.markdown("### 🧪 Ragic 抓取資料測試（導入前驗證用）")
     st.caption("可選擇抓取筆數/offset/日期區間，並顯示每筆專案欄位與 CUE Excel 解析結果（含波段拆分）。")
 
+    # --- Debug log（可複製）---
+    if "_ragic_debug_log" not in st.session_state:
+        st.session_state["_ragic_debug_log"] = []
+
+    def _log(msg: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        st.session_state["_ragic_debug_log"].append(f"[{ts}] {msg}")
+        # 避免 log 無限長
+        if len(st.session_state["_ragic_debug_log"]) > 500:
+            st.session_state["_ragic_debug_log"] = st.session_state["_ragic_debug_log"][-500:]
+
     # 從「訂檔網址」推導 host/account/tab/sheet
     default_ragic_url = "https://ap13.ragic.com/soundwow/forms12/17"
     ragic_url = st.text_input("訂檔表單（Listing/Sheet）網址", value=default_ragic_url, help="格式類似：https://ap13.ragic.com/soundwow/forms12/17")
@@ -6163,27 +6174,45 @@ elif selected_tab == "🧪 Ragic抓取測試":
 
     fetch_btn = st.button("🚀 抓取並顯示", type="primary")
     if fetch_btn:
+        st.session_state["_ragic_debug_log"] = []
+        _log("開始抓取")
         if not api_key.strip():
             st.error("請輸入 Ragic API Key（可放 .streamlit/secrets.toml 的 RAGIC_API_KEY）。")
+            _log("API Key 為空，停止")
             st.stop()
         host, account, tab_folder, sheet_index = _parse_ragic_sheet_url(ragic_url)
         api_url = _ragic_listing_url(host, account, tab_folder, sheet_index, limit=int(limit), offset=int(offset), subtables0=subtables0, fts="")
+        _log(f"API URL={api_url}")
         payload, err = ragic_api_get_json(api_url, api_key, params=None, timeout=60)
         if err:
             st.error(f"抓取失敗：{err}")
+            _log(f"抓取失敗：{err}")
             st.stop()
         # 診斷：顯示本次回傳的 key 數量（不暴露內容）
         try:
             st.caption(f"API 回傳 keys 數量：{len(payload) if isinstance(payload, dict) else '非 dict'}")
         except Exception:
             pass
+        _log(f"payload type={type(payload).__name__}")
+        if isinstance(payload, dict):
+            try:
+                sample_items = list(payload.items())[:3]
+                _log("payload 前 3 個 key/value type=" + ", ".join([f"{str(k)[:30]}:{type(v).__name__}" for k, v in sample_items]))
+            except Exception as e:
+                _log(f"取樣 payload 失敗：{e}")
         entries = _ragic_extract_entries(payload)
+        _log(f"entries count={len(entries)}")
         if not entries:
             st.warning("沒有抓到任何資料（可能沒有權限或資料為空）。")
+            _log("entries 為空，停止")
             st.stop()
 
         rows = [_entry_to_row(e) for e in entries]
         df = pd.DataFrame(rows)
+        _log(f"df rows={len(df)} cols={list(df.columns)}")
+        # 檢查 _ragicId 有無
+        if "_ragicId" in df.columns:
+            _log(f"_ragicId notna count={int(df['_ragicId'].notna().sum())}")
 
         # 本機日期篩選
         if filter_field != "不篩" and (date_from or date_to):
@@ -6211,9 +6240,13 @@ elif selected_tab == "🧪 Ragic抓取測試":
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.markdown("#### ② 檢視單筆專案 + 解析 CUE Excel")
-        ids = df["_ragicId"].dropna().astype(int).tolist() if "_ragicId" in df.columns else []
+        if "_ragicId" in df.columns:
+            ids = pd.to_numeric(df["_ragicId"], errors="coerce").dropna().astype(int).tolist()
+        else:
+            ids = []
         if not ids:
             st.info("抓到的資料沒有 _ragicId，無法進一步解析。")
+            _log("無可用 _ragicId（可能 listing entry 沒有正確解析成 dict record）")
             st.stop()
         sel_id = st.selectbox("選擇 _ragicId", options=ids)
         entry = next((e for e in entries if int(e.get("_ragicId", -1)) == int(sel_id)), None)
@@ -6277,6 +6310,25 @@ elif selected_tab == "🧪 Ragic抓取測試":
                             st.dataframe(pd.DataFrame(sample), use_container_width=True, hide_index=True)
                         else:
                             st.warning("此檔案沒有解析出每日檔次（可能不是預期版型或內容全空）。")
+
+    # --- Debug log output（可複製/下載）---
+    st.markdown("---")
+    st.markdown("#### 🧾 Debug Log（可直接複製貼回）")
+    log_text = "\n".join(st.session_state.get("_ragic_debug_log", []))
+    st.text_area("log", value=log_text, height=220, key="ragic_debug_log_area")
+    b1, b2 = st.columns([1, 3])
+    with b1:
+        if st.button("清除 log", key="btn_clear_ragic_log"):
+            st.session_state["_ragic_debug_log"] = []
+            st.rerun()
+    with b2:
+        st.download_button(
+            "下載 log.txt",
+            data=(log_text or "").encode("utf-8"),
+            file_name=f"ragic_debug_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            key="download_ragic_log",
+        )
 
 elif selected_tab == "🧪 實驗分頁":
     # 鎖定分頁：切換「分析對象」等控件會觸發 rerun，避免跳到其他分頁
