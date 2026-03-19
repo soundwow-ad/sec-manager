@@ -5,6 +5,9 @@ streamlit>=1.28.0
 pandas>=2.0.0
 requests>=2.31.0
 openpyxl>=3.1.0
+# Google Sheet 後端（資料持久化）
+gspread>=5.12.0
+google-auth>=2.23.0
 
 # 注意：以下為 Python 標準庫，無需安裝
 # - json
