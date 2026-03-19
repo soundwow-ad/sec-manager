@@ -132,9 +132,15 @@ def render_table1_tab(
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        # 表1在 Segments 模式下會用 `ad_flight_segments` 建表，列數不等同 orders 筆數。
-        # 為避免混淆：上方「訂單筆數」一律以 orders 筆數為準。
-        st.metric("訂單筆數", len(df_orders))
+        orders_count = len(df_orders)
+        shown_rows = len(df_table1)
+        # 表1在 Segments 模式下會用 `ad_flight_segments` 建表，列數與 orders 不同。
+        # 這裡讓上方數字「對應你目前看到的表格列數」，避免語意錯置。
+        if use_segments:
+            st.metric("顯示列數(檔次段)", shown_rows)
+            st.caption(f"原始 orders 筆數={orders_count}")
+        else:
+            st.metric("訂單筆數", orders_count)
     with col2:
         st.metric("客戶數", df_table1["客戶"].nunique() if "客戶" in df_table1.columns else (df_table1["HYUNDAI_CUSTIN"].nunique() if "HYUNDAI_CUSTIN" in df_table1.columns else 0))
     with col3:
@@ -150,7 +156,9 @@ def render_table1_tab(
 
     if use_segments:
         # 這段用來解釋「為什麼訂單筆數只有 178 / 為什麼你看到的列數和 orders 不一致」
-        st.caption(f"目前啟用 Segments 模式：表1顯示列數={len(df_table1)}（Segments 為彙總後的檔次段，不等同 orders 筆數）。")
+        st.caption(
+            f"目前啟用 Segments 模式：表1顯示列數={len(df_table1)}（檔次段列數；不等同 orders 筆數）。"
+        )
 
     with st.expander("🔍 篩選條件", expanded=False):
         c1, c2, c3 = st.columns(3)
