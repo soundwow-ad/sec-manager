@@ -156,6 +156,8 @@ def _ragic_auth_headers(api_key: str) -> dict:
 def ragic_api_get_json(url: str, api_key: str, params: dict | None = None, timeout: int = 30):
     """Ragic API GET -> json（錯誤時回傳 (None, error_str)）"""
     try:
+        # Ragic 的 `api` 參數有時在 query string 中呈現為 `?api`，
+        # 這裡避免用 params 破壞原始 query（改由呼叫端直接把 limit/offset/fts 組進 URL 亦可）。
         r = requests.get(url, headers=_ragic_auth_headers(api_key), params=params or {}, timeout=timeout)
         r.raise_for_status()
         return r.json(), None
@@ -164,13 +166,23 @@ def ragic_api_get_json(url: str, api_key: str, params: dict | None = None, timeo
 
 
 def _ragic_extract_entries(payload: dict) -> list[dict]:
-    """將 listing payload（key 為 ragicId 的 dict）轉成 list[entry]"""
+    """
+    將 listing payload（key 通常為 record id 的 dict）轉成 list[entry]。
+    注意：部分 listing 回傳可能沒有 `_ragicId` 欄位，此時用 dict key 當作 `_ragicId`。
+    """
     if not isinstance(payload, dict):
         return []
-    out = []
-    for _, entry in payload.items():
-        if isinstance(entry, dict) and entry.get("_ragicId") is not None:
-            out.append(entry)
+    out: list[dict] = []
+    for k, entry in payload.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("_ragicId") is None:
+            # listing 可能只以 key 表示 record id
+            try:
+                entry["_ragicId"] = int(k) if str(k).isdigit() else k
+            except Exception:
+                entry["_ragicId"] = k
+        out.append(entry)
     return out
 
 
@@ -6104,6 +6116,17 @@ elif selected_tab == "🧪 Ragic抓取測試":
             pass
         return "ap13.ragic.com", "soundwow", "forms12", "17"
 
+    def _ragic_listing_url(host: str, account: str, tab_folder: str, sheet_index: str, *, limit: int, offset: int, subtables0: bool, fts: str = ""):
+        # 參考 fptest：用 query string 直接組 `?api&v=3&...`，避免 params 影響 `api` 旗標
+        base = f"https://{host.strip().strip('/')}/{account.strip().strip('/')}/{tab_folder.strip().strip('/')}/{str(sheet_index).strip().strip('/')}"
+        qs = [("api", ""), ("v", "3"), ("limit", str(int(limit))), ("offset", str(int(offset)))]
+        if subtables0:
+            qs.append(("subtables", "0"))
+        if fts:
+            qs.append(("fts", fts))
+        from urllib.parse import urlencode
+        return base + "?" + urlencode(qs)
+
     def _entry_to_row(e: dict):
         def g(name):
             fid = RAGIC_FIELDS.get(name)
@@ -6141,12 +6164,8 @@ elif selected_tab == "🧪 Ragic抓取測試":
             st.error("請輸入 Ragic API Key（可放 .streamlit/secrets.toml 的 RAGIC_API_KEY）。")
             st.stop()
         host, account, tab_folder, sheet_index = _parse_ragic_sheet_url(ragic_url)
-        api_url = _ragic_make_api_url(host, account, tab_folder, sheet_index)
-        params = {"limit": int(limit), "offset": int(offset)}
-        if subtables0:
-            params["subtables"] = 0
-
-        payload, err = ragic_api_get_json(api_url, api_key, params=params, timeout=60)
+        api_url = _ragic_listing_url(host, account, tab_folder, sheet_index, limit=int(limit), offset=int(offset), subtables0=subtables0, fts="")
+        payload, err = ragic_api_get_json(api_url, api_key, params=None, timeout=60)
         if err:
             st.error(f"抓取失敗：{err}")
             st.stop()
