@@ -343,6 +343,18 @@ def init_db():
             message TEXT
         )
     ''')
+    # 效能索引：大資料量（萬筆級）時加速查詢/排序/篩選
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_updated_at ON orders(updated_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_contract_id ON orders(contract_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_platform ON orders(platform)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_product ON orders(product)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_orders_sales ON orders(sales)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_segments_source_order_id ON ad_flight_segments(source_order_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_segments_media_platform ON ad_flight_segments(media_platform)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_segments_date_range ON ad_flight_segments(start_date, end_date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ragic_logs_batch_id ON ragic_import_logs(batch_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ragic_logs_created_at ON ragic_import_logs(created_at)")
     conn.commit()
     # 若尚無任何帳號，建立預設管理員 admin / admin123
     c.execute("SELECT COUNT(*) FROM users")
@@ -705,6 +717,12 @@ def _styler_one_decimal(df):
     if df.empty:
         return df.style
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # 大表時避免 Styler 造成前端渲染卡頓（10萬筆情境關鍵優化）
+    try:
+        if df.shape[0] * df.shape[1] > 120000:
+            return df
+    except Exception:
+        pass
     if not num_cols:
         return df.style
     # 使用 {:,.1f} 讓超過三位數的數字自動加千分位（如 1,234.5）
@@ -5472,10 +5490,6 @@ if selected_tab == "📋 表1-資料":
     st.markdown("---")
     st.markdown("#### 📝 訂單逐筆管理（新增／編輯／刪除）")
     st.caption("新增一筆：於下方表單填寫後儲存。每列可點「編輯」修改或「刪除」移除該筆訂單；變更後會自動重建檔次段。")
-    conn_crud = get_db_connection()
-    df_orders_crud = pd.read_sql("SELECT * FROM orders", conn_crud)
-    conn_crud.close()
-
     def _idx(lst, val, default=0):
         try:
             return lst.index(val) if val in lst else default
@@ -5505,40 +5519,46 @@ if selected_tab == "📋 表1-資料":
         if st.button("💾 儲存新增", key="crud_btn_add"):
             if not new_id or not new_client or not new_product:
                 st.error("請填寫訂單 ID、客戶、產品名稱")
-            elif not df_orders_crud.empty and new_id in df_orders_crud['id'].tolist():
-                st.error(f"訂單 ID「{new_id}」已存在")
             else:
-                conn_ins = get_db_connection()
-                try:
-                    contract_id_val = (new_contract_id or '').strip() or None
-                    project_val = float(new_project_amount) if new_project_amount else None
-                    split_val = float(new_split_amount) if new_split_amount else None
-                    conn_ins.execute("""
+                conn_chk = get_db_connection()
+                _exists = conn_chk.execute("SELECT 1 FROM orders WHERE id=? LIMIT 1", (new_id,)).fetchone() is not None
+                conn_chk.close()
+                if _exists:
+                    st.error(f"訂單 ID「{new_id}」已存在")
+                else:
+                    conn_ins = get_db_connection()
+                    try:
+                        contract_id_val = (new_contract_id or '').strip() or None
+                        project_val = float(new_project_amount) if new_project_amount else None
+                        split_val = float(new_split_amount) if new_split_amount else None
+                        conn_ins.execute("""
                         INSERT INTO orders (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (new_id, new_platform, new_client, new_product, new_sales, new_company,
                           new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d"),
                           int(new_seconds), int(new_spots), float(new_amount), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), contract_id_val, new_seconds_type, project_val, split_val))
-                    conn_ins.commit()
-                    df_after = pd.read_sql("SELECT * FROM orders", conn_ins)
-                    conn_ins.close()
-                    build_ad_flight_segments(df_after, load_platform_settings(), write_to_db=True)
-                    if project_val and project_val > 0 and contract_id_val:
-                        _compute_and_save_split_amount_for_contract(contract_id_val)
-                    _sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
-                    st.success("✅ 已新增一筆")
-                    if '_table1_cache_key' in st.session_state:
-                        del st.session_state['_table1_cache_key']
-                    st.rerun()
-                except Exception as e:
-                    conn_ins.rollback()
-                    conn_ins.close()
-                    st.error(f"新增失敗: {e}")
+                        conn_ins.commit()
+                        df_after = pd.read_sql("SELECT * FROM orders", conn_ins)
+                        conn_ins.close()
+                        build_ad_flight_segments(df_after, load_platform_settings(), write_to_db=True)
+                        if project_val and project_val > 0 and contract_id_val:
+                            _compute_and_save_split_amount_for_contract(contract_id_val)
+                        _sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
+                        st.success("✅ 已新增一筆")
+                        if '_table1_cache_key' in st.session_state:
+                            del st.session_state['_table1_cache_key']
+                        st.rerun()
+                    except Exception as e:
+                        conn_ins.rollback()
+                        conn_ins.close()
+                        st.error(f"新增失敗: {e}")
 
     # 編輯表單（僅在點選某列「編輯」時顯示）
     crud_edit_id = st.session_state.get("crud_edit_id")
-    if crud_edit_id and not df_orders_crud.empty:
-        edit_match = df_orders_crud[df_orders_crud['id'] == crud_edit_id]
+    if crud_edit_id:
+        conn_edit = get_db_connection()
+        edit_match = pd.read_sql("SELECT * FROM orders WHERE id=? LIMIT 1", conn_edit, params=(crud_edit_id,))
+        conn_edit.close()
         if not edit_match.empty:
             selected_row = edit_match.iloc[0]
             with st.expander("✏️ 編輯此筆訂單", expanded=True):
@@ -5608,39 +5628,31 @@ if selected_tab == "📋 表1-資料":
                             del st.session_state["crud_edit_id"]
                         st.rerun()
 
-    # 訂單管理高效模式：搜尋 + 分頁 + 單筆操作（避免大量逐列按鈕造成卡頓）
-    if df_orders_crud.empty:
+    # 訂單管理高效模式：SQL 搜尋 + SQL 分頁 + 單筆操作（可支援大量資料）
+    st.markdown("**訂單清單（高效模式）**")
+    st.caption("使用搜尋與分頁瀏覽；只對選取的一筆做「編輯／刪除」，避免全表渲染。")
+
+    q1, q2, q3 = st.columns([2, 1, 1])
+    with q1:
+        crud_kw = st.text_input("搜尋（ID / 合約 / 客戶 / 產品 / 平台）", key="crud_kw", placeholder="輸入關鍵字")
+    with q2:
+        page_size = st.selectbox("每頁筆數", options=[20, 50, 100, 200, 500], index=1, key="crud_page_size")
+    with q3:
+        sort_desc = st.checkbox("最新在前", value=True, key="crud_sort_desc")
+
+    conn_list = get_db_connection()
+    where_sql = ""
+    params = []
+    if crud_kw and str(crud_kw).strip():
+        kw_like = f"%{str(crud_kw).strip()}%"
+        where_sql = "WHERE id LIKE ? OR IFNULL(contract_id,'') LIKE ? OR IFNULL(client,'') LIKE ? OR IFNULL(product,'') LIKE ? OR IFNULL(platform,'') LIKE ?"
+        params = [kw_like, kw_like, kw_like, kw_like, kw_like]
+
+    total_rows = int(pd.read_sql(f"SELECT COUNT(1) AS n FROM orders {where_sql}", conn_list, params=params).iloc[0]["n"])
+    if total_rows <= 0:
+        conn_list.close()
         st.info("📭 尚無訂單資料，請於上方「新增一筆訂單」填寫後儲存。")
     else:
-        st.markdown("**訂單清單（高效模式）**")
-        st.caption("使用搜尋與分頁瀏覽；只對選取的一筆做「編輯／刪除」，可支援大量資料。")
-
-        q1, q2, q3 = st.columns([2, 1, 1])
-        with q1:
-            crud_kw = st.text_input("搜尋（ID / 合約 / 客戶 / 產品 / 平台）", key="crud_kw", placeholder="輸入關鍵字")
-        with q2:
-            page_size = st.selectbox("每頁筆數", options=[20, 50, 100, 200], index=1, key="crud_page_size")
-        with q3:
-            sort_desc = st.checkbox("最新在前", value=True, key="crud_sort_desc")
-
-        df_list = df_orders_crud.copy()
-        if crud_kw and str(crud_kw).strip():
-            kw = str(crud_kw).strip().lower()
-            mask = (
-                df_list["id"].astype(str).str.lower().str.contains(kw, regex=False)
-                | df_list.get("contract_id", pd.Series([""] * len(df_list))).astype(str).str.lower().str.contains(kw, regex=False)
-                | df_list.get("client", pd.Series([""] * len(df_list))).astype(str).str.lower().str.contains(kw, regex=False)
-                | df_list.get("product", pd.Series([""] * len(df_list))).astype(str).str.lower().str.contains(kw, regex=False)
-                | df_list.get("platform", pd.Series([""] * len(df_list))).astype(str).str.lower().str.contains(kw, regex=False)
-            )
-            df_list = df_list[mask]
-
-        if "updated_at" in df_list.columns:
-            df_list = df_list.sort_values("updated_at", ascending=not sort_desc, na_position="last")
-        elif "id" in df_list.columns:
-            df_list = df_list.sort_values("id", ascending=not sort_desc, na_position="last")
-
-        total_rows = len(df_list)
         total_pages = max(1, (total_rows + int(page_size) - 1) // int(page_size))
         p1, p2 = st.columns([1, 3])
         with p1:
@@ -5648,11 +5660,19 @@ if selected_tab == "📋 表1-資料":
         with p2:
             st.caption(f"共 {total_rows} 筆，{total_pages} 頁")
 
-        start = (int(page_no) - 1) * int(page_size)
-        end = start + int(page_size)
-        df_page = df_list.iloc[start:end].copy()
-        show_cols = [c for c in ["id", "contract_id", "platform", "client", "product", "start_date", "end_date", "seconds", "spots", "amount_net", "updated_at"] if c in df_page.columns]
-        st.dataframe(_styler_one_decimal(df_page[show_cols]), use_container_width=True, height=360, hide_index=True)
+        offset_val = (int(page_no) - 1) * int(page_size)
+        order_by = "updated_at DESC, id DESC" if sort_desc else "updated_at ASC, id ASC"
+        sql_page = f"""
+            SELECT id, contract_id, platform, client, product, start_date, end_date, seconds, spots, amount_net, updated_at
+            FROM orders
+            {where_sql}
+            ORDER BY {order_by}
+            LIMIT ? OFFSET ?
+        """
+        df_page = pd.read_sql(sql_page, conn_list, params=[*params, int(page_size), int(offset_val)])
+        conn_list.close()
+
+        st.dataframe(_styler_one_decimal(df_page), use_container_width=True, height=360, hide_index=True)
 
         # 單筆操作：避免每列按鈕
         options = df_page["id"].astype(str).tolist() if not df_page.empty else []
