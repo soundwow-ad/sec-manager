@@ -165,7 +165,9 @@ def render_table1_tab(
                 st.session_state["seg_missing_only"] = False
                 st.session_state["_seg_force_show_all"] = False
 
-            only_missing = st.checkbox("只顯示尚未填寫 seconds_type", value=True, key="seg_missing_only")
+            if "seg_missing_only" not in st.session_state:
+                st.session_state["seg_missing_only"] = True
+            only_missing = st.checkbox("只顯示尚未填寫 seconds_type", key="seg_missing_only")
             kw = st.text_input("關鍵字（segment_id / 公司 / 客戶 / 平台）", value="", key="seg_edit_kw").strip().lower()
 
             if only_missing:
