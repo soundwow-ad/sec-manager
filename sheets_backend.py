@@ -29,17 +29,38 @@ def _get_sheet_config() -> dict[str, Any]:
     try:
         import streamlit as st
         secrets = getattr(st, "secrets", None)
-        if secrets and hasattr(secrets, "get"):
-            # 支援 google_sheet 或 Google_Sheet（Cloud 有時會改 key 名稱）
-            gs = secrets.get("google_sheet") or secrets.get("Google_Sheet") or {}
-            if isinstance(gs, dict):
-                # 有 sheet_id 才當成有效區塊；若沒有則仍可從環境變數補
-                sid = gs.get("sheet_id") or gs.get("sheet_id_")
-                if sid or os.environ.get("GOOGLE_SHEET_ID"):
-                    out = dict(gs)
-                    if not sid and os.environ.get("GOOGLE_SHEET_ID"):
-                        out["sheet_id"] = os.environ["GOOGLE_SHEET_ID"]
-                    return out
+        if not secrets:
+            raise ValueError("no secrets")
+        # 支援 google_sheet 或 Google_Sheet（Cloud 有時會改 key 名稱）
+        gs = getattr(secrets, "google_sheet", None) or getattr(secrets, "Google_Sheet", None)
+        if gs is None and hasattr(secrets, "get"):
+            gs = secrets.get("google_sheet") or secrets.get("Google_Sheet")
+        if gs is None:
+            raise ValueError("no google_sheet section")
+        # Cloud 的 secrets 可能是 AttributeDict 等，不一定是 dict，需相容 .get 與屬性
+        def _get(obj: Any, *keys: str) -> Any:
+            for k in keys:
+                if obj is None:
+                    return None
+                if isinstance(obj, dict):
+                    v = obj.get(k)
+                else:
+                    v = getattr(obj, k, None)
+                if v is not None and v != "":
+                    return v
+            return None
+        sid = _get(gs, "sheet_id", "sheet_id_") or os.environ.get("GOOGLE_SHEET_ID")
+        if sid or os.environ.get("GOOGLE_SHEET_ID"):
+            try:
+                out = dict(gs)
+            except (TypeError, ValueError):
+                out = {k: _get(gs, k) for k in ("sheet_id", "sheet_id_", "enabled", "client_email", "private_key", "credentials", "credentials_json", "project_id", "private_key_id", "client_id")}
+                out = {k: v for k, v in out.items() if v is not None}
+            if not out.get("sheet_id") and os.environ.get("GOOGLE_SHEET_ID"):
+                out["sheet_id"] = os.environ["GOOGLE_SHEET_ID"]
+            elif sid and not out.get("sheet_id"):
+                out["sheet_id"] = sid.strip() if isinstance(sid, str) else str(sid)
+            return out
     except Exception:
         pass
     out = {}
@@ -57,8 +78,16 @@ def _get_credentials():
     """取得 Google API 憑證（服務帳戶）。"""
     try:
         import streamlit as st
-        raw_gs = (st.secrets.get("google_sheet") or st.secrets.get("Google_Sheet")) if hasattr(st, "secrets") and st.secrets else None
-        gs = dict(raw_gs) if isinstance(raw_gs, dict) else {}
+        raw_gs = getattr(st.secrets, "google_sheet", None) or getattr(st.secrets, "Google_Sheet", None)
+        if raw_gs is None and hasattr(st, "secrets") and st.secrets and hasattr(st.secrets, "get"):
+            raw_gs = st.secrets.get("google_sheet") or st.secrets.get("Google_Sheet")
+        if raw_gs is None:
+            gs = {}
+        else:
+            try:
+                gs = dict(raw_gs)
+            except (TypeError, ValueError):
+                gs = {k: getattr(raw_gs, k, None) for k in ("credentials", "credentials_json", "client_email", "private_key", "project_id", "private_key_id", "client_id") if getattr(raw_gs, k, None) is not None}
     except Exception:
         gs = {}
     cred_dict = gs.get("credentials")
