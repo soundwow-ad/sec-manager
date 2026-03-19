@@ -130,6 +130,144 @@ def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
     }
 
 
+def _extract_ragic_value(entry: Any, field_id: str) -> Any:
+    """從 entry 取單一欄位值（主表直接 key=field_id；子表可能為 list，取第一筆或加總數字）。"""
+    if entry is None or not isinstance(entry, dict):
+        return None
+    v = entry.get(field_id)
+    if v is None:
+        return None
+    if isinstance(v, list):
+        if not v:
+            return None
+        first = v[0]
+        if isinstance(first, (int, float)) and not isinstance(first, bool):
+            try:
+                return sum(float(x) for x in v if x is not None and str(x).replace(".", "").replace("-", "").replace(" ", "").replace("e", "").replace("E", "").isdigit())
+            except (TypeError, ValueError):
+                return _normalize_cell(first)
+        if isinstance(first, dict):
+            # 子表列為 dict：每筆取 field_id 的值，數字則加總
+            nums = []
+            for row in v:
+                if not isinstance(row, dict):
+                    continue
+                cell = row.get(field_id)
+                if cell is None or cell == "":
+                    continue
+                try:
+                    nums.append(float(cell))
+                except (TypeError, ValueError):
+                    pass
+            if nums:
+                return int(sum(nums)) if all(x == int(x) for x in nums) else sum(nums)
+            return _normalize_cell(first.get(field_id))
+        return _normalize_cell(first)
+    return v
+
+
+def _extract_ragic_from_any_subtable(entry: dict, field_id: str) -> Any:
+    """Ragic 子表可能在任意 key 下（如 #1015xxx#），遍歷 entry 找 list of dict 並在該欄位加總。"""
+    if not entry or not isinstance(entry, dict):
+        return None
+    for val in entry.values():
+        if not isinstance(val, list) or not val:
+            continue
+        first = val[0]
+        if not isinstance(first, dict) or field_id not in first:
+            continue
+        nums = []
+        for row in val:
+            if not isinstance(row, dict):
+                continue
+            cell = row.get(field_id)
+            if cell is None or cell == "":
+                continue
+            try:
+                nums.append(float(cell))
+            except (TypeError, ValueError):
+                pass
+        if nums:
+            return int(sum(nums)) if all(x == int(x) for x in nums) else sum(nums)
+    return None
+
+
+def _entry_to_table1_ragic_overrides(entry: dict, ragic_fields: dict[str, str]) -> dict[str, Any]:
+    """
+    從 Ragic entry 解析可對應到表1 的欄位，回傳 {表1欄位名: 值}。
+    用於覆寫「無法判斷」，能從 Ragic 抓到的就填進去。
+    """
+    def g(name: str) -> str:
+        fid = ragic_fields.get(name)
+        if fid and fid in entry and entry.get(fid) not in (None, ""):
+            return _normalize_cell(entry.get(fid))
+        return _normalize_cell(entry.get(name, ""))
+
+    overrides: dict[str, Any] = {}
+
+    # 主管 ← 業務主管
+    v = g("業務主管")
+    if v:
+        overrides["主管"] = v
+
+    # 提交日 ← 建立日期 或 修改日期
+    v = g("建立日期") or g("修改日期")
+    if v:
+        overrides["提交日"] = v
+
+    # 實收金額 / 專案實收金額 ← 收入_實收金額總計(未稅)（主表或子表）
+    fid_revenue = ragic_fields.get("收入_實收金額總計(未稅)")
+    if fid_revenue:
+        rev = _extract_ragic_value(entry, fid_revenue)
+        if rev is None or rev == "":
+            rev = _extract_ragic_from_any_subtable(entry, fid_revenue)
+        if rev is not None and rev != "":
+            try:
+                overrides["實收金額"] = int(float(rev))
+                overrides["除佣實收"] = int(float(rev))
+                overrides["專案實收金額"] = int(float(rev))
+            except (TypeError, ValueError):
+                overrides["實收金額"] = rev
+                overrides["專案實收金額"] = rev
+
+    # 拆分金額 ← 收入_除價買收總計(未稅)
+    fid_split = ragic_fields.get("收入_除價買收總計(未稅)")
+    if fid_split:
+        sp = _extract_ragic_value(entry, fid_split)
+        if sp is None or sp == "":
+            sp = _extract_ragic_from_any_subtable(entry, fid_split)
+        if sp is not None and sp != "":
+            try:
+                overrides["拆分金額"] = int(float(sp))
+            except (TypeError, ValueError):
+                overrides["拆分金額"] = sp
+
+    # 製作成本 ← 收入_製作成本x金額(未稅) 或 收入_成本
+    for name in ("收入_製作成本x金額(未稅)", "收入_製作成本x金額(未稅)_2", "收入_成本"):
+        fid = ragic_fields.get(name)
+        if fid:
+            cost = _extract_ragic_value(entry, fid)
+            if cost is None or cost == "":
+                cost = _extract_ragic_from_any_subtable(entry, fid)
+            if cost is not None and cost != "":
+                try:
+                    overrides["製作成本"] = int(float(cost)) if isinstance(cost, (int, float)) else cost
+                except (TypeError, ValueError):
+                    overrides["製作成本"] = cost
+                break
+
+    # 獎金% ← 退佣% 或 現折% 或 退佣%+現折%
+    for name in ("退佣%+現折%", "退佣%", "現折%"):
+        fid = ragic_fields.get(name)
+        if fid:
+            pct = _extract_ragic_value(entry, fid)
+            if pct is not None and pct != "":
+                overrides["獎金%"] = _normalize_cell(pct)
+                break
+
+    return overrides
+
+
 # 常見附檔副檔名（Ragic 附檔 token 常為 ...@xxx.副檔名）
 FILE_EXTENSIONS = (".xlsx", ".xls", ".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx", ".csv")
 
@@ -397,6 +535,7 @@ def render_ragic_test_tab(
     if not excel_tokens:
         excel_tokens = _deep_collect_excel_tokens(entry)
     order_info = _entry_to_order_info(entry, ragic_fields)
+    ragic_overrides = _entry_to_table1_ragic_overrides(entry, ragic_fields)
     custom_settings = load_platform_settings() if load_platform_settings else None
     build_table1 = build_table1_from_cue_excel if build_table1_from_cue_excel else None
 
@@ -420,7 +559,7 @@ def render_ragic_test_tab(
                 if not df_t1.empty:
                     all_table1_dfs.append(df_t1)
             else:
-                # 無 build_table1 時仍組出表1 結構，缺的欄位填「無法判斷」/「抓不到」
+                # 無 build_table1 時仍組出表1 結構，能從 Ragic 解析的欄位用 ragic_overrides
                 rows = []
                 for u in cue_units:
                     daily_spots = u.get("daily_spots") or []
@@ -429,21 +568,21 @@ def render_ragic_test_tab(
                     days = int(u.get("days") or len(daily_spots))
                     row = {
                         "業務": order_info.get("sales") or PLACEHOLDER_NOT_AVAILABLE,
-                        "主管": PLACEHOLDER_MISSING,
+                        "主管": ragic_overrides.get("主管") or PLACEHOLDER_MISSING,
                         "合約編號": order_info.get("order_id") or PLACEHOLDER_NOT_AVAILABLE,
                         "公司": order_info.get("company") or PLACEHOLDER_NOT_AVAILABLE,
-                        "實收金額": PLACEHOLDER_MISSING,
-                        "除佣實收": PLACEHOLDER_MISSING,
-                        "專案實收金額": PLACEHOLDER_MISSING,
-                        "拆分金額": PLACEHOLDER_MISSING,
-                        "製作成本": PLACEHOLDER_MISSING,
-                        "獎金%": PLACEHOLDER_MISSING,
+                        "實收金額": ragic_overrides.get("實收金額") if "實收金額" in ragic_overrides else PLACEHOLDER_MISSING,
+                        "除佣實收": ragic_overrides.get("除佣實收") if "除佣實收" in ragic_overrides else PLACEHOLDER_MISSING,
+                        "專案實收金額": ragic_overrides.get("專案實收金額") if "專案實收金額" in ragic_overrides else PLACEHOLDER_MISSING,
+                        "拆分金額": ragic_overrides.get("拆分金額") if "拆分金額" in ragic_overrides else PLACEHOLDER_MISSING,
+                        "製作成本": ragic_overrides.get("製作成本") or PLACEHOLDER_MISSING,
+                        "獎金%": ragic_overrides.get("獎金%") or PLACEHOLDER_MISSING,
                         "核定獎金": PLACEHOLDER_MISSING,
                         "加發獎金": PLACEHOLDER_MISSING,
                         "業務基金": PLACEHOLDER_MISSING,
                         "協力基金": PLACEHOLDER_MISSING,
                         "秒數用途": "銷售秒數",
-                        "提交日": PLACEHOLDER_MISSING,
+                        "提交日": ragic_overrides.get("提交日") or PLACEHOLDER_MISSING,
                         "HYUNDAI_CUSTIN": order_info.get("client") or PLACEHOLDER_NOT_AVAILABLE,
                         "秒數": sec,
                         "素材": order_info.get("product") or PLACEHOLDER_NOT_AVAILABLE,
@@ -500,6 +639,10 @@ def render_ragic_test_tab(
 
     if not df_combined.empty:
         df_combined = _ensure_full_table1_columns(df_combined, placeholder=PLACEHOLDER_MISSING)
+        # 用 Ragic 欄位覆寫可解析的欄位（主管、實收金額、製作成本、獎金%、提交日等）
+        for col, val in ragic_overrides.items():
+            if col in df_combined.columns and val not in (None, ""):
+                df_combined[col] = val
         # 與 表1-資料 最大權限相同：可橫向滾動、完整欄位
         st.markdown("#### 📊 表1-資料（可橫向滾動查看完整欄位）")
         st.dataframe(
