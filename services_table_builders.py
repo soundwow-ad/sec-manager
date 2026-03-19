@@ -179,7 +179,7 @@ def build_table2_summary_by_company(df_segments, df_daily, df_orders, get_media_
     return out
 
 
-def build_table2_details_by_company(df_segments, df_daily, df_orders):
+def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_to_include=None):
     if df_segments.empty:
         return {}
     try:
@@ -194,11 +194,21 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders):
     result = {}
     daily_pivot = pd.DataFrame()
     if not df_daily.empty and "segment_id" in df_daily.columns and "日期" in df_daily.columns:
+        if companies_to_include:
+            seg = seg[seg["company"].isin(companies_to_include)].copy()
+            seg_ids = seg["segment_id"].dropna().unique().tolist()
+            if seg_ids:
+                df_daily = df_daily[df_daily["segment_id"].isin(seg_ids)].copy()
         _piv = df_daily.groupby(["segment_id", "日期"])["使用店秒"].sum().unstack(fill_value=0)
         weekday_map = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
         _piv.columns = [f"{c.month}/{c.day}({weekday_map.get(c.weekday(), '')})" if hasattr(c, "month") else str(c) for c in _piv.columns]
         daily_pivot = _piv
-    for company in seg["company"].dropna().unique():
+    if companies_to_include:
+        seg_companies = [c for c in companies_to_include if c in seg["company"].dropna().unique().tolist()]
+    else:
+        seg_companies = seg["company"].dropna().unique().tolist()
+
+    for company in seg_companies:
         if not company:
             continue
         s = seg[seg["company"] == company].copy()

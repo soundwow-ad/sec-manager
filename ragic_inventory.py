@@ -114,6 +114,20 @@ def _explode_segments_to_daily_cached(df_segments):
 
 
 @st.cache_data(ttl=120)
+def _explode_segments_to_daily_cached_by_db_mtime(db_mtime):
+    """
+    依 DB 修改時間快取 daily（避免用 DataFrame 當 cache key，減少 hashing 成本）。
+    """
+    from services_cache import explode_segments_to_daily_cached
+
+    df_seg = _load_segments_cached(db_mtime)
+    return explode_segments_to_daily_cached(
+        explode_segments_to_daily=explode_segments_to_daily,
+        df_segments=df_seg,
+    )
+
+
+@st.cache_data(ttl=120)
 def _build_table3_monthly_control_cached(db_mtime, year, month, monthly_capacity_tuple):
     """快取表3 建表結果，以 db_mtime+年月+容量為鍵，不 hash 大 DataFrame，換月才約 1 秒內。"""
     from services_cache import build_table3_monthly_control_cached
@@ -582,11 +596,12 @@ def build_table2_summary_by_company(df_segments, df_daily, df_orders, media_plat
         media_platform=media_platform,
     )
 
-def build_table2_details_by_company(df_segments, df_daily, df_orders):
+def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_to_include=None):
     return service_build_table2_details_by_company(
         df_segments=df_segments,
         df_daily=df_daily,
         df_orders=df_orders,
+        companies_to_include=companies_to_include,
     )
 
 def build_table3_monthly_control(df_daily, df_segments, custom_settings=None, year=None, month=None, monthly_capacity=None):
@@ -821,6 +836,7 @@ run_app_shell(
     load_orders_cached=_load_orders_cached,
     load_segments_cached=_load_segments_cached,
     explode_segments_to_daily_cached=_explode_segments_to_daily_cached,
+    explode_segments_to_daily_cached_by_db_mtime=_explode_segments_to_daily_cached_by_db_mtime,
     build_ad_flight_segments=build_ad_flight_segments,
     render_tab3=_render_tab3,
     render_main_tabs=render_main_tabs,

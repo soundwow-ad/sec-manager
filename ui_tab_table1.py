@@ -197,17 +197,20 @@ def render_table1_tab(
             mime="text/csv; charset=utf-8",
         )
 
-    render_order_crud_panel(
-        get_db_connection=get_db_connection,
-        load_platform_settings=load_platform_settings,
-        build_ad_flight_segments=build_ad_flight_segments,
-        compute_split_for_contract=compute_split_for_contract,
-        sync_sheets_if_enabled=sync_sheets_if_enabled,
-        styler_one_decimal=styler_one_decimal,
-        mock_platform_raw=mock_platform_raw,
-        mock_sales=mock_sales,
-        mock_company=mock_company,
-        mock_seconds=mock_seconds,
-        seconds_usage_types=seconds_usage_types,
-    )
+    if st.checkbox("顯示訂單逐筆管理（較慢）", value=False, key="table1_show_crud"):
+        render_order_crud_panel(
+            get_db_connection=get_db_connection,
+            load_platform_settings=load_platform_settings,
+            build_ad_flight_segments=build_ad_flight_segments,
+            compute_split_for_contract=compute_split_for_contract,
+            sync_sheets_if_enabled=sync_sheets_if_enabled,
+            styler_one_decimal=styler_one_decimal,
+            mock_platform_raw=mock_platform_raw,
+            mock_sales=mock_sales,
+            mock_company=mock_company,
+            mock_seconds=mock_seconds,
+            seconds_usage_types=seconds_usage_types,
+        )
+    else:
+        st.caption("尚未開啟訂單逐筆管理：可提升表1顯示速度。")
 
