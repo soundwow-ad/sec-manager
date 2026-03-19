@@ -312,7 +312,7 @@ def write_platform_settings_to_sheets(df: pd.DataFrame) -> str | None:
     try:
         sh = _client()
         if not sh:
-            return None
+            return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_PLATFORM_SETTINGS)
         vals = _df_to_values(df)
@@ -326,7 +326,7 @@ def write_capacity_to_sheets(df: pd.DataFrame) -> str | None:
     try:
         sh = _client()
         if not sh:
-            return None
+            return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_CAPACITY)
         vals = _df_to_values(df)
@@ -340,7 +340,7 @@ def write_purchase_to_sheets(df: pd.DataFrame) -> str | None:
     try:
         sh = _client()
         if not sh:
-            return None
+            return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_PURCHASE)
         vals = _df_to_values(df)
@@ -354,7 +354,7 @@ def write_users_to_sheets(df: pd.DataFrame) -> str | None:
     try:
         sh = _client()
         if not sh:
-            return None
+            return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_USERS)
         vals = _df_to_values(df)

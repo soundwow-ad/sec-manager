@@ -4837,10 +4837,17 @@ if _sheets_on:
     if st.sidebar.button("🔄 立即同步至 Google Sheet", key="btn_sheets_sync"):
         errs = _sync_sheets_if_enabled()
         if errs:
-            st.sidebar.error("同步失敗: " + "; ".join(errs[:2]))
+            st.session_state["_sheets_last_sync"] = ("error", "同步失敗: " + "; ".join(errs[:3]))
         else:
-            st.sidebar.success("已同步")
-        st.rerun()
+            st.session_state["_sheets_last_sync"] = ("success", "已同步至 Google Sheet")
+    # 顯示上一次同步結果（不立刻 rerun，讓使用者看得到）
+    _sync_status = st.session_state.get("_sheets_last_sync")
+    if _sync_status:
+        kind, msg = _sync_status
+        if kind == "error":
+            st.sidebar.error(msg)
+        else:
+            st.sidebar.success(msg)
 else:
     st.sidebar.caption("📄 未設定 Google Sheet（可於 .streamlit/secrets.toml 或 Cloud Secrets 設定）")
     if _sheets_reason:
