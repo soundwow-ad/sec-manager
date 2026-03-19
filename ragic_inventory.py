@@ -162,7 +162,11 @@ def _sync_sheets_if_enabled(only_tables=None, skip_if_unchanged=True):
                 skip_if_unchanged=skip_if_unchanged,
             )
     except Exception:
-        pass
+        # 這裡不能默默吞掉錯誤：不然 UI 會誤判「已同步但其實沒有」
+        # 讓使用者看到可用的錯誤訊息以便排除權限/保護問題。
+        import traceback
+
+        return ["sync_sheets_if_enabled exception: " + traceback.format_exc(limit=2).strip()]
     return []
 
 
