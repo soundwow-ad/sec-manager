@@ -328,6 +328,21 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Ragic 區間匯入紀錄：保留每個批次、每個檔案的成功/失敗細節
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS ragic_import_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL,           -- success / failed / info
+            phase TEXT NOT NULL,            -- fetch / filter / download / parse / insert / summary
+            ragic_id TEXT,
+            order_no TEXT,
+            file_token TEXT,
+            imported_orders INTEGER DEFAULT 0,
+            message TEXT
+        )
+    ''')
     conn.commit()
     # 若尚無任何帳號，建立預設管理員 admin / admin123
     c.execute("SELECT COUNT(*) FROM users")
@@ -2027,6 +2042,323 @@ def _normalize_seconds_type(val):
     if s in SECONDS_USAGE_TYPES:
         return s
     return SECONDS_TYPE_ALIASES.get(s, '銷售秒數')
+
+
+def _log_ragic_import(batch_id, status, phase, ragic_id=None, order_no=None, file_token=None, imported_orders=0, message=""):
+    """寫入 Ragic 匯入明細日誌。"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO ragic_import_logs
+            (batch_id, status, phase, ragic_id, order_no, file_token, imported_orders, message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(batch_id),
+                str(status),
+                str(phase),
+                str(ragic_id) if ragic_id is not None else None,
+                str(order_no) if order_no is not None else None,
+                str(file_token) if file_token is not None else None,
+                int(imported_orders or 0),
+                str(message or ""),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _ragic_get_field(entry: dict, name: str):
+    """同時支援用欄位 ID 與中文欄位名取值。"""
+    fid = RAGIC_FIELDS.get(name)
+    if fid and isinstance(entry, dict) and entry.get(fid) not in (None, ""):
+        return entry.get(fid)
+    if isinstance(entry, dict):
+        return entry.get(name)
+    return None
+
+
+def _ragic_to_date(v):
+    """將 Ragic 日期字串轉 date。"""
+    if v is None:
+        return None
+    try:
+        d = pd.to_datetime(str(v).strip(), errors="coerce")
+        if pd.isna(d):
+            return None
+        return d.date()
+    except Exception:
+        return None
+
+
+def _entry_in_date_range(entry: dict, date_from: date, date_to: date, field_name="建立日期") -> bool:
+    """判斷 entry 是否落在指定日期區間。"""
+    d = _ragic_to_date(_ragic_get_field(entry, field_name))
+    if d is None:
+        return False
+    if date_from and d < date_from:
+        return False
+    if date_to and d > date_to:
+        return False
+    return True
+
+
+def _collect_excel_tokens_from_entry(entry: dict) -> list[str]:
+    """遞迴掃描 entry 內所有 Excel token。"""
+    out = []
+    def walk(v):
+        if v is None:
+            return
+        if isinstance(v, str):
+            s = v.strip()
+            if "@" in s and s.lower().endswith((".xlsx", ".xls")):
+                out.append(s)
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                walk(x)
+            return
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+            return
+    walk(entry)
+    # 去重保序
+    seen = set()
+    return [t for t in out if t not in seen and not seen.add(t)]
+
+
+def _ragic_extract_project_amount(entry: dict) -> float | None:
+    """從 Ragic entry 擷取專案總額（實收/除佣）。"""
+    candidates = [
+        "實收金額總計(未稅)",
+        "收入_實收金額總計(未稅)",
+        "除佣實收總計(未稅)",
+        "收入_除價買收總計(未稅)",
+    ]
+    for k in candidates:
+        v = entry.get(k)
+        if v not in (None, ""):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    # 子表遍歷
+    for v in entry.values():
+        if not isinstance(v, list):
+            continue
+        for row in v:
+            if not isinstance(row, dict):
+                continue
+            for k in ("實收金額(未稅)", "除佣實收(未稅)", "實收金額總計(未稅)"):
+                rv = row.get(k)
+                if rv not in (None, ""):
+                    try:
+                        return float(rv)
+                    except (TypeError, ValueError):
+                        pass
+    return None
+
+
+def import_ragic_to_orders_by_date_range(
+    ragic_url: str,
+    api_key: str,
+    date_from: date,
+    date_to: date,
+    date_field: str = "建立日期",
+    replace_existing: bool = False,
+    max_fetch: int = 5000,
+):
+    """
+    從 Ragic 指定日期區間匯入資料：
+    - 先抓 listing，再依日期欄位本機篩選
+    - 逐筆下載 CUE Excel 並解析成 orders
+    - 寫入 ragic_import_logs，保留每筆成功/失敗細節
+    """
+    batch_id = f"ragic_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    _log_ragic_import(batch_id, "info", "summary", message=f"開始匯入：{date_field} {date_from}~{date_to}")
+
+    if not ragic_url or not str(ragic_url).strip():
+        _log_ragic_import(batch_id, "failed", "fetch", message="Ragic URL 空白")
+        return False, "Ragic URL 不可為空", batch_id
+    if not api_key or not str(api_key).strip():
+        _log_ragic_import(batch_id, "failed", "fetch", message="API Key 空白")
+        return False, "Ragic API Key 不可為空", batch_id
+
+    try:
+        from ragic_client import parse_sheet_url, make_listing_url, get_json, extract_entries, parse_file_tokens, download_file
+    except Exception as e:
+        _log_ragic_import(batch_id, "failed", "fetch", message=f"ragic_client 載入失敗：{e}")
+        return False, f"無法載入 ragic_client：{e}", batch_id
+
+    ref = parse_sheet_url(ragic_url)
+    limit = 200
+    all_entries = []
+    for offset in range(0, max_fetch, limit):
+        url = make_listing_url(ref, limit=limit, offset=offset, subtables0=False, fts="")
+        payload, err = get_json(url, api_key, timeout=60)
+        if err:
+            _log_ragic_import(batch_id, "failed", "fetch", message=f"offset={offset} 抓取失敗：{err}")
+            return False, f"抓取 Ragic 失敗（offset={offset}）：{err}", batch_id
+        entries = extract_entries(payload)
+        if not entries:
+            break
+        all_entries.extend(entries)
+        if len(entries) < limit:
+            break
+
+    _log_ragic_import(batch_id, "info", "fetch", imported_orders=len(all_entries), message=f"已抓取 entries={len(all_entries)}")
+    if not all_entries:
+        return False, "Ragic 無資料可匯入", batch_id
+
+    filtered = [e for e in all_entries if _entry_in_date_range(e, date_from, date_to, field_name=date_field)]
+    _log_ragic_import(batch_id, "info", "filter", imported_orders=len(filtered), message=f"日期篩選後 entries={len(filtered)}")
+    if not filtered:
+        return False, "指定日期區間內無資料", batch_id
+
+    order_rows = []
+    parsed_files = 0
+    for entry in filtered:
+        ragic_id = entry.get("_ragicId")
+        order_no = _ragic_get_field(entry, "訂檔單號") or f"ragic_{ragic_id}"
+        order_info = {
+            "client": str(_ragic_get_field(entry, "客戶") or ""),
+            "product": str(_ragic_get_field(entry, "產品名稱") or ""),
+            "sales": str(_ragic_get_field(entry, "業務(開發客戶)") or ""),
+            "company": str(_ragic_get_field(entry, "公司") or ""),
+            "order_id": str(order_no),
+            "amount_net": 0,
+        }
+        project_amount = _ragic_extract_project_amount(entry)
+
+        cue_val = _ragic_get_field(entry, "訂檔CUE表")
+        tokens = parse_file_tokens(cue_val) if cue_val not in (None, "") else []
+        excel_tokens = [t for t in tokens if str(t).lower().endswith((".xlsx", ".xls"))]
+        if not excel_tokens:
+            excel_tokens = _collect_excel_tokens_from_entry(entry)
+
+        if not excel_tokens:
+            _log_ragic_import(batch_id, "failed", "download", ragic_id=ragic_id, order_no=order_no, message="無 CUE Excel 附件")
+            continue
+
+        for file_i, token in enumerate(excel_tokens):
+            content, derr = download_file(ref, token, api_key, timeout=180)
+            if derr or not content:
+                _log_ragic_import(batch_id, "failed", "download", ragic_id=ragic_id, order_no=order_no, file_token=token, message=f"下載失敗：{derr}")
+                continue
+            try:
+                cue_units = parse_cue_excel_for_table1(content, order_info=order_info)
+            except Exception as e:
+                cue_units = []
+                _log_ragic_import(batch_id, "failed", "parse", ragic_id=ragic_id, order_no=order_no, file_token=token, message=f"解析例外：{e}")
+            if not cue_units:
+                _log_ragic_import(batch_id, "failed", "parse", ragic_id=ragic_id, order_no=order_no, file_token=token, message="解析不到可用 ad_unit")
+                continue
+
+            rows_before = len(order_rows)
+            for i, u in enumerate(cue_units):
+                daily_spots = u.get("daily_spots") or []
+                days = int(u.get("days") or len(daily_spots) or 1)
+                total_spots = int(u.get("total_spots") or (sum(daily_spots) if daily_spots else 0))
+                spots = int(round(total_spots / max(days, 1))) if total_spots > 0 else int(daily_spots[0] if daily_spots else 0)
+                order_id = f"ragic_{ragic_id}_{file_i}_{i}_{uuid.uuid4().hex[:6]}"
+                start_date = str(u.get("start_date") or _ragic_get_field(entry, "執行開始日期") or "")
+                end_date = str(u.get("end_date") or _ragic_get_field(entry, "執行結束日期") or "")
+                seconds = int(u.get("seconds") or 0)
+                platform = str(u.get("platform") or _ragic_get_field(entry, "平台") or "")
+                if not platform or not start_date or not end_date or seconds <= 0 or spots <= 0:
+                    continue
+                order_rows.append((
+                    order_id,
+                    platform,
+                    order_info["client"],
+                    order_info["product"],
+                    order_info["sales"],
+                    order_info["company"],
+                    _normalize_date(start_date) or start_date,
+                    _normalize_date(end_date) or end_date,
+                    seconds,
+                    spots,
+                    0,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    str(order_no),
+                    "銷售秒數",
+                    project_amount if project_amount and project_amount > 0 else None,
+                    None,
+                ))
+            imported_now = len(order_rows) - rows_before
+            if imported_now > 0:
+                parsed_files += 1
+                _log_ragic_import(batch_id, "success", "parse", ragic_id=ragic_id, order_no=order_no, file_token=token, imported_orders=imported_now, message="解析成功")
+            else:
+                _log_ragic_import(batch_id, "failed", "parse", ragic_id=ragic_id, order_no=order_no, file_token=token, message="解析有結果但無有效列")
+
+    if not order_rows:
+        _log_ragic_import(batch_id, "failed", "summary", message="無可匯入訂單")
+        return False, "日期區間有資料，但無可匯入的 CUE 解析結果", batch_id
+
+    init_db()
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if replace_existing:
+            c.execute("DELETE FROM orders")
+        c.executemany(
+            """
+            INSERT OR REPLACE INTO orders
+            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            order_rows,
+        )
+        conn.commit()
+        conn.close()
+        conn_read = get_db_connection()
+        df_orders = pd.read_sql("SELECT * FROM orders", conn_read)
+        conn_read.close()
+        build_ad_flight_segments(df_orders, load_platform_settings(), write_to_db=True)
+        contracts_with_project = df_orders.loc[
+            df_orders["project_amount_net"].notna()
+            & (pd.to_numeric(df_orders["project_amount_net"], errors="coerce") > 0),
+            "contract_id",
+        ].dropna().unique()
+        for cid in contracts_with_project:
+            if cid:
+                _compute_and_save_split_amount_for_contract(str(cid))
+        _sync_sheets_if_enabled()
+        _log_ragic_import(
+            batch_id,
+            "success",
+            "insert",
+            imported_orders=len(order_rows),
+            message=f"匯入完成：entries={len(filtered)} files={parsed_files} rows={len(order_rows)}",
+        )
+        return True, f"Ragic 匯入完成：{len(order_rows)} 筆（來源 entries={len(filtered)}，成功檔案={parsed_files}）", batch_id
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        _log_ragic_import(batch_id, "failed", "insert", imported_orders=len(order_rows), message=f"寫入失敗：{e}")
+        return False, f"寫入資料庫失敗：{e}", batch_id
+
+
+def get_ragic_import_logs(limit=1000):
+    """讀取 Ragic 匯入紀錄（最新在前）。"""
+    init_db()
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql(
+            "SELECT * FROM ragic_import_logs ORDER BY id DESC LIMIT ?",
+            conn,
+            params=(int(limit),),
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
 
 
 def _extract_google_sheet_id(url_or_id):
@@ -4636,6 +4968,64 @@ with st.sidebar.expander("📥 匯入 Google 試算表（表1結構）", expande
                 else:
                     st.error(msg)
 
+# 匯入 Ragic（指定日期區間）
+with st.sidebar.expander("📥 匯入 Ragic（日期區間）", expanded=False):
+    st.caption("可依 Ragic 指定日期欄位篩選區間，匯入該期間所有可解析的 CUE Excel。")
+    ragic_url_default = "https://ap13.ragic.com/soundwow/forms12/17"
+    ragic_import_url = st.text_input(
+        "Ragic 表單網址",
+        value=ragic_url_default,
+        key="ragic_import_url",
+        placeholder="https://ap13.ragic.com/soundwow/forms12/17",
+    )
+    try:
+        _api_default = st.secrets.get("RAGIC_API_KEY", "")
+    except Exception:
+        _api_default = ""
+    ragic_import_api_key = st.text_input(
+        "Ragic API Key",
+        value=_api_default,
+        type="password",
+        key="ragic_import_api_key",
+    )
+    ragic_date_field = st.selectbox(
+        "日期欄位",
+        options=["建立日期", "執行開始日期", "執行結束日期"],
+        index=0,
+        key="ragic_import_date_field",
+    )
+    d1, d2 = st.columns(2)
+    with d1:
+        ragic_date_from = st.date_input("起日", value=date.today() - timedelta(days=30), key="ragic_import_date_from")
+    with d2:
+        ragic_date_to = st.date_input("迄日", value=date.today(), key="ragic_import_date_to")
+    ragic_replace = st.checkbox("匯入時取代現有資料", value=False, key="ragic_import_replace")
+    if st.button("📥 匯入 Ragic 區間資料", key="btn_ragic_import_range"):
+        if ragic_date_from > ragic_date_to:
+            st.error("日期區間錯誤：起日不可大於迄日")
+        elif not (ragic_import_url or "").strip():
+            st.error("請輸入 Ragic 表單網址")
+        elif not (ragic_import_api_key or "").strip():
+            st.error("請輸入 Ragic API Key")
+        else:
+            with st.spinner("正在從 Ragic 匯入資料（抓取、下載 Excel、解析、寫入）..."):
+                ok, msg, batch_id = import_ragic_to_orders_by_date_range(
+                    ragic_url=ragic_import_url.strip(),
+                    api_key=ragic_import_api_key.strip(),
+                    date_from=ragic_date_from,
+                    date_to=ragic_date_to,
+                    date_field=ragic_date_field,
+                    replace_existing=ragic_replace,
+                )
+                if ok:
+                    st.session_state["_ragic_last_batch_id"] = batch_id
+                    st.success(msg)
+                    time.sleep(0.3)
+                    st.rerun()
+                else:
+                    st.session_state["_ragic_last_batch_id"] = batch_id
+                    st.error(msg)
+
 # 重置資料庫按鈕（用於清除舊 DB 問題）
 st.sidebar.markdown("---")
 if st.sidebar.button("🧨 重置資料庫（刪除並重建）", help="⚠️ 警告：這會刪除所有現有資料"):
@@ -4685,7 +5075,6 @@ df_orders = _load_orders_cached(_db_mtime)
 
 if df_orders.empty:
     st.warning("📭 資料庫為空，請由左側匯入試算表或新增訂單。")
-    st.stop()
 
 # 重新載入設定（確保最新）
 custom_settings = load_platform_settings()
@@ -4703,12 +5092,12 @@ if df_daily.empty and not df_orders.empty:
         df_daily = _explode_segments_to_daily_cached(df_seg_main) if not df_seg_main.empty else pd.DataFrame()
 
 # --- 分頁呈現（角色導向入口 + 只渲染當前分頁）---
-TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "📊 ROI", "🧪 Ragic抓取測試", "🧪 實驗分頁"]
+TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "📊 ROI", "🧾 Ragic匯入紀錄", "🧪 Ragic抓取測試", "🧪 實驗分頁"]
 # 各角色可見分頁：行政主管=全部(預設)、業務=表1+表3(唯讀)、總經理=總結表+表3+表2+分公司×媒體+ROI+實驗(不呈現表1、不呈現媒體秒數與採購)
 TAB_OPTIONS_BY_ROLE = {
     "行政主管": TAB_OPTIONS,  # 擁有所有權限，預設角色
     "業務": ["📋 表1-資料", "📊 表3-每日庫存"],
-    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📊 ROI", "🧪 實驗分頁"],
+    "總經理": ["📉 總結表圖表", "📊 表3-每日庫存", "📅 表2-秒數明細", "📊 分公司×媒體 每月秒數", "📊 ROI", "🧾 Ragic匯入紀錄", "🧪 實驗分頁"],
 }
 
 role_label = {"行政主管": "🗂 行政主管", "業務": "🧑‍💼 業務", "總經理": "👔 總經理"}.get(role, role)
@@ -5974,6 +6363,42 @@ elif selected_tab == "📋 媒體秒數與採購":
             st.rerun()
     st.markdown("---")
     st.caption("儲存後，ROI 分頁將依「購買價格 ÷ 購買秒數」計算成本並產生投報率。")
+
+elif selected_tab == "🧾 Ragic匯入紀錄":
+    st.markdown("### 🧾 Ragic 匯入紀錄")
+    st.caption("顯示每次 Ragic 區間匯入的詳細成功/失敗紀錄（抓取、下載、解析、寫入）。")
+    last_batch = st.session_state.get("_ragic_last_batch_id")
+    if last_batch:
+        st.info(f"最近一次批次：`{last_batch}`")
+    logs = get_ragic_import_logs(limit=3000)
+    if logs.empty:
+        st.info("目前尚無 Ragic 匯入紀錄。")
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            batch_opts = ["全部"] + sorted(logs["batch_id"].dropna().astype(str).unique().tolist())
+            sel_batch = st.selectbox("批次", batch_opts, index=0, key="ragic_log_batch")
+        with c2:
+            status_opts = ["全部"] + sorted(logs["status"].dropna().astype(str).unique().tolist())
+            sel_status = st.selectbox("狀態", status_opts, index=0, key="ragic_log_status")
+        with c3:
+            phase_opts = ["全部"] + sorted(logs["phase"].dropna().astype(str).unique().tolist())
+            sel_phase = st.selectbox("階段", phase_opts, index=0, key="ragic_log_phase")
+        f = logs.copy()
+        if sel_batch != "全部":
+            f = f[f["batch_id"].astype(str) == sel_batch]
+        if sel_status != "全部":
+            f = f[f["status"].astype(str) == sel_status]
+        if sel_phase != "全部":
+            f = f[f["phase"].astype(str) == sel_phase]
+        st.dataframe(_styler_one_decimal(f), use_container_width=True, height=520, hide_index=True)
+        st.download_button(
+            "📥 下載匯入紀錄 CSV",
+            data=f.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"ragic_import_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv; charset=utf-8",
+            key="dl_ragic_import_logs_csv",
+        )
 
 elif selected_tab == "🧪 Ragic抓取測試":
     from ui_ragic_test import render_ragic_test_tab
