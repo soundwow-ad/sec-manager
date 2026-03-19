@@ -340,10 +340,22 @@ def write_orders_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_ORDERS)
-        vals = _df_to_values(df)
-        if not vals:
-            ws.clear()
+        # 嚴謹處理：有些權限/保護情況下 `ws.clear()` 會失敗。
+        # 這裡改用「覆蓋式清空」：讀出目前值的形狀，再用空字串覆蓋整個區塊。
+        if df is None or df.empty:
+            header = (list(getattr(df, "columns", [])) if df is not None else [])
+            existing = ws.get_all_values() or []
+            if not existing:
+                ws.update([header] if header else [[""]], value_input_option="USER_ENTERED")
+                return None
+            ncols = max(len(existing[0]), len(header))
+            header_padded = header + [""] * (ncols - len(header))
+            blank_row = [""] * ncols
+            new_values = [header_padded] + [blank_row] * (max(0, len(existing) - 1))
+            ws.update(new_values, value_input_option="USER_ENTERED")
             return None
+
+        vals = _df_to_values(df)
         ws.update(vals, value_input_option="USER_ENTERED")
         return None
     except Exception as e:
@@ -357,10 +369,21 @@ def write_segments_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_SEGMENTS)
-        vals = _df_to_values(df)
-        if not vals:
-            ws.clear()
+        # 同 orders：改用覆蓋式清空，避免 `ws.clear()` 失敗造成不同步。
+        if df is None or df.empty:
+            header = (list(getattr(df, "columns", [])) if df is not None else [])
+            existing = ws.get_all_values() or []
+            if not existing:
+                ws.update([header] if header else [[""]], value_input_option="USER_ENTERED")
+                return None
+            ncols = max(len(existing[0]), len(header))
+            header_padded = header + [""] * (ncols - len(header))
+            blank_row = [""] * ncols
+            new_values = [header_padded] + [blank_row] * (max(0, len(existing) - 1))
+            ws.update(new_values, value_input_option="USER_ENTERED")
             return None
+
+        vals = _df_to_values(df)
         ws.update(vals, value_input_option="USER_ENTERED")
         return None
     except Exception as e:
