@@ -130,11 +130,27 @@ def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
     }
 
 
-def _extract_ragic_value(entry: Any, field_id: str) -> Any:
-    """從 entry 取單一欄位值（主表直接 key=field_id；子表可能為 list，取第一筆或加總數字）。"""
+def _get_ragic_value_by_keys(entry: dict, *keys: str) -> Any:
+    """依序用 key 從 entry 取值，第一個非空即回傳（支援 Ragic 回傳 ID 或中文欄位名）。"""
+    if not entry or not isinstance(entry, dict):
+        return None
+    for k in keys:
+        if not k:
+            continue
+        v = entry.get(k)
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _extract_ragic_value(entry: Any, field_id: str, chinese_names: list[str] | None = None) -> Any:
+    """從 entry 取單一欄位值（主表 key 可能為 field_id 或中文名；子表可能為 list）。"""
     if entry is None or not isinstance(entry, dict):
         return None
-    v = entry.get(field_id)
+    keys_to_try = [field_id]
+    if chinese_names:
+        keys_to_try.extend(chinese_names)
+    v = _get_ragic_value_by_keys(entry, *keys_to_try)
     if v is None:
         return None
     if isinstance(v, list):
@@ -147,12 +163,15 @@ def _extract_ragic_value(entry: Any, field_id: str) -> Any:
             except (TypeError, ValueError):
                 return _normalize_cell(first)
         if isinstance(first, dict):
-            # 子表列為 dict：每筆取 field_id 的值，數字則加總
+            # 子表列為 dict：每筆用 field_id 或 chinese_names 取值，數字則加總
             nums = []
+            try_keys = [field_id]
+            if chinese_names:
+                try_keys.extend(chinese_names)
             for row in v:
                 if not isinstance(row, dict):
                     continue
-                cell = row.get(field_id)
+                cell = _get_ragic_value_by_keys(row, *try_keys)
                 if cell is None or cell == "":
                     continue
                 try:
@@ -161,26 +180,37 @@ def _extract_ragic_value(entry: Any, field_id: str) -> Any:
                     pass
             if nums:
                 return int(sum(nums)) if all(x == int(x) for x in nums) else sum(nums)
-            return _normalize_cell(first.get(field_id))
+            return _normalize_cell(_get_ragic_value_by_keys(first, *try_keys))
         return _normalize_cell(first)
     return v
 
 
-def _extract_ragic_from_any_subtable(entry: dict, field_id: str) -> Any:
-    """Ragic 子表可能在任意 key 下（如 #1015xxx#），遍歷 entry 找 list of dict 並在該欄位加總。"""
+# Ragic 常回傳中文欄位名，表1 對應的多種可能鍵名
+RAGIC_REVENUE_KEYS = ["收入_實收金額總計(未稅)", "實收金額總計(未稅)", "實收金額(未稅)"]
+RAGIC_NET_KEYS = ["收入_除價買收總計(未稅)", "除佣實收總計(未稅)", "除佣實收(未稅)"]
+RAGIC_COST_KEYS = ["收入_製作成本x金額(未稅)", "收入_成本", "製作成本", "成本"]
+
+
+def _extract_ragic_from_any_subtable(entry: dict, field_id: str, chinese_names: list[str] | None = None) -> Any:
+    """Ragic 子表可能在任意 key 下，遍歷 entry 找 list of dict，用 field_id 或中文欄位名加總。"""
     if not entry or not isinstance(entry, dict):
         return None
+    try_keys = [field_id]
+    if chinese_names:
+        try_keys.extend(chinese_names)
     for val in entry.values():
         if not isinstance(val, list) or not val:
             continue
         first = val[0]
-        if not isinstance(first, dict) or field_id not in first:
+        if not isinstance(first, dict):
+            continue
+        if _get_ragic_value_by_keys(first, *try_keys) is None:
             continue
         nums = []
         for row in val:
             if not isinstance(row, dict):
                 continue
-            cell = row.get(field_id)
+            cell = _get_ragic_value_by_keys(row, *try_keys)
             if cell is None or cell == "":
                 continue
             try:
@@ -215,55 +245,68 @@ def _entry_to_table1_ragic_overrides(entry: dict, ragic_fields: dict[str, str]) 
     if v:
         overrides["提交日"] = v
 
-    # 實收金額 / 專案實收金額 ← 收入_實收金額總計(未稅)（主表或子表）
+    # 實收金額 / 專案實收金額 ← 主表「實收金額總計(未稅)」或子表「收入_實收金額總計(未稅)」「實收金額(未稅)」
     fid_revenue = ragic_fields.get("收入_實收金額總計(未稅)")
-    if fid_revenue:
-        rev = _extract_ragic_value(entry, fid_revenue)
-        if rev is None or rev == "":
-            rev = _extract_ragic_from_any_subtable(entry, fid_revenue)
-        if rev is not None and rev != "":
-            try:
-                overrides["實收金額"] = int(float(rev))
-                overrides["除佣實收"] = int(float(rev))
-                overrides["專案實收金額"] = int(float(rev))
-            except (TypeError, ValueError):
-                overrides["實收金額"] = rev
-                overrides["專案實收金額"] = rev
+    rev = _get_ragic_value_by_keys(entry, *([fid_revenue] if fid_revenue else []), "實收金額總計(未稅)", "收入_實收金額總計(未稅)")
+    if rev is None or rev == "":
+        rev = _extract_ragic_value(entry, fid_revenue or "", RAGIC_REVENUE_KEYS)
+    if rev is None or rev == "":
+        rev = _extract_ragic_from_any_subtable(entry, fid_revenue or "", ["實收金額(未稅)", "實收金額總計(未稅)"])
+    if rev is not None and rev != "":
+        try:
+            overrides["實收金額"] = int(float(rev))
+            overrides["除佣實收"] = int(float(rev))
+            overrides["專案實收金額"] = int(float(rev))
+        except (TypeError, ValueError):
+            overrides["實收金額"] = rev
+            overrides["專案實收金額"] = rev
 
-    # 拆分金額 ← 收入_除價買收總計(未稅)
+    # 除佣實收（若上面未取到，單獨試「除佣實收總計(未稅)」）
+    if "除佣實收" not in overrides:
+        fid_net = ragic_fields.get("收入_除價買收總計(未稅)")
+        net = _get_ragic_value_by_keys(entry, *([fid_net] if fid_net else []), "除佣實收總計(未稅)", "除佣實收(未稅)")
+        if net is None or net == "":
+            net = _extract_ragic_from_any_subtable(entry, fid_net or "", ["除佣實收(未稅)", "除佣實收總計(未稅)"])
+        if net is not None and net != "":
+            try:
+                overrides["除佣實收"] = int(float(net))
+            except (TypeError, ValueError):
+                overrides["除佣實收"] = net
+
+    # 拆分金額 ← 收入_除價買收總計(未稅) 或 除价買收相關（若有獨立欄位再填）
     fid_split = ragic_fields.get("收入_除價買收總計(未稅)")
-    if fid_split:
-        sp = _extract_ragic_value(entry, fid_split)
-        if sp is None or sp == "":
-            sp = _extract_ragic_from_any_subtable(entry, fid_split)
-        if sp is not None and sp != "":
-            try:
-                overrides["拆分金額"] = int(float(sp))
-            except (TypeError, ValueError):
-                overrides["拆分金額"] = sp
+    sp = _extract_ragic_value(entry, fid_split or "", RAGIC_NET_KEYS)
+    if sp is None or sp == "":
+        sp = _extract_ragic_from_any_subtable(entry, fid_split or "", ["除价買收(未稅)", "除價買收總計(未稅)"])
+    if sp is not None and sp != "":
+        try:
+            overrides["拆分金額"] = int(float(sp))
+        except (TypeError, ValueError):
+            overrides["拆分金額"] = sp
 
-    # 製作成本 ← 收入_製作成本x金額(未稅) 或 收入_成本
-    for name in ("收入_製作成本x金額(未稅)", "收入_製作成本x金額(未稅)_2", "收入_成本"):
-        fid = ragic_fields.get(name)
-        if fid:
-            cost = _extract_ragic_value(entry, fid)
-            if cost is None or cost == "":
-                cost = _extract_ragic_from_any_subtable(entry, fid)
-            if cost is not None and cost != "":
-                try:
-                    overrides["製作成本"] = int(float(cost)) if isinstance(cost, (int, float)) else cost
-                except (TypeError, ValueError):
-                    overrides["製作成本"] = cost
-                break
+    # 製作成本 ← 主表「製作成本」或子表 收入_製作成本 / 收入_成本 / 成本
+    cost = _get_ragic_value_by_keys(entry, "製作成本", "成本")
+    if cost is None or cost == "":
+        for name in ("收入_製作成本x金額(未稅)", "收入_成本"):
+            fid = ragic_fields.get(name)
+            if fid:
+                cost = _extract_ragic_value(entry, fid, RAGIC_COST_KEYS)
+                if cost is None or cost == "":
+                    cost = _extract_ragic_from_any_subtable(entry, fid, ["製作成本", "成本"])
+                if cost is not None and cost != "":
+                    break
+    if cost is not None and cost != "":
+        try:
+            overrides["製作成本"] = int(float(cost)) if isinstance(cost, (int, float)) else cost
+        except (TypeError, ValueError):
+            overrides["製作成本"] = cost
 
-    # 獎金% ← 退佣% 或 現折% 或 退佣%+現折%
+    # 獎金% ← 退佣%+現折% / 退佣% / 現折%（主表常為中文鍵）
     for name in ("退佣%+現折%", "退佣%", "現折%"):
-        fid = ragic_fields.get(name)
-        if fid:
-            pct = _extract_ragic_value(entry, fid)
-            if pct is not None and pct != "":
-                overrides["獎金%"] = _normalize_cell(pct)
-                break
+        pct = _get_ragic_value_by_keys(entry, *([ragic_fields.get(name)] if ragic_fields.get(name) else []), name)
+        if pct is not None and pct != "":
+            overrides["獎金%"] = _normalize_cell(pct)
+            break
 
     return overrides
 
