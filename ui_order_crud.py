@@ -31,6 +31,15 @@ def render_order_crud_panel(
     st.markdown("#### 📝 訂單逐筆管理（新增／編輯／刪除）")
     st.caption("新增一筆：於下方表單填寫後儲存。每列可點「編輯」修改或「刪除」移除該筆訂單；變更後會自動重建檔次段。")
 
+    # 置頂：先顯示 orders 總筆數，避免為了看總數一直往下捲動
+    try:
+        conn_total = get_db_connection()
+        total_all = int(pd.read_sql("SELECT COUNT(1) AS n FROM orders", conn_total).iloc[0]["n"])
+        conn_total.close()
+        st.markdown(f"**📊 訂單總筆數：{total_all:,} 筆**")
+    except Exception:
+        st.markdown("**📊 訂單總筆數：-**")
+
     def _idx(lst, val, default=0):
         try:
             return lst.index(val) if val in lst else default
@@ -253,11 +262,8 @@ def render_order_crud_panel(
         conn_list.close()
         st.info("📭 尚無訂單資料，請於上方「新增一筆訂單」填寫後儲存。")
     else:
-        # 總筆數醒目顯示，方便與表1「訂單筆數」對照；有搜尋時為符合條件的筆數
         if crud_kw and str(crud_kw).strip():
             st.markdown(f"**📊 符合搜尋條件：{total_rows:,} 筆**")
-        else:
-            st.markdown(f"**📊 訂單總筆數：{total_rows:,} 筆**")
         total_pages = max(1, (total_rows + int(page_size) - 1) // int(page_size))
         p1, p2 = st.columns([1, 3])
         with p1:

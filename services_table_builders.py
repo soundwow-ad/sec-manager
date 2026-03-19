@@ -254,6 +254,7 @@ def build_table1_from_segments(
     df_orders_info=None,
     get_db_connection_fn=None,
     get_media_platform_display_fn=None,
+    include_daily_columns: bool = True,
 ) -> pd.DataFrame:
     if df_segments.empty:
         return pd.DataFrame()
@@ -290,18 +291,18 @@ def build_table1_from_segments(
             if "contract_id" not in df.columns:
                 df["contract_id"] = None
 
-    all_dates = set()
-    for _, row in df.iterrows():
-        if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
-            all_dates.update(pd.date_range(row["start_date"], row["end_date"], freq="D"))
-
     date_column_names = []
     weekday_map = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
-    if all_dates:
-        for d in sorted(all_dates):
-            date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
-            if date_key not in date_column_names:
-                date_column_names.append(date_key)
+    if include_daily_columns:
+        all_dates = set()
+        for _, row in df.iterrows():
+            if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
+                all_dates.update(pd.date_range(row["start_date"], row["end_date"], freq="D"))
+        if all_dates:
+            for d in sorted(all_dates):
+                date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
+                if date_key not in date_column_names:
+                    date_column_names.append(date_key)
 
     result_rows = []
     for idx, row in df.iterrows():
@@ -339,15 +340,16 @@ def build_table1_from_segments(
         base_row["總秒數"] = int(df.loc[idx, "總秒數"])
         base_row["店數"] = int(df.loc[idx, "店數"])
         base_row["使用總秒數"] = int(df.loc[idx, "使用總秒數"])
-        for date_key in date_column_names:
-            base_row[date_key] = ""
-        if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
-            date_range = pd.date_range(row["start_date"], row["end_date"], freq="D")
-            daily_spots = df.loc[idx, "每天總檔次"]
-            for d in date_range:
-                date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
-                if date_key in date_column_names:
-                    base_row[date_key] = daily_spots
+        if include_daily_columns:
+            for date_key in date_column_names:
+                base_row[date_key] = ""
+            if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
+                date_range = pd.date_range(row["start_date"], row["end_date"], freq="D")
+                daily_spots = df.loc[idx, "每天總檔次"]
+                for d in date_range:
+                    date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
+                    if date_key in date_column_names:
+                        base_row[date_key] = daily_spots
         result_rows.append(base_row)
 
     df_excel = pd.DataFrame(result_rows)
@@ -400,6 +402,7 @@ def build_excel_table1_view(
     parse_platform_region_fn=None,
     get_media_platform_display_fn=None,
     get_store_count_fn=None,
+    include_daily_columns: bool = True,
 ) -> pd.DataFrame:
     if use_segments:
         if df_segments is not None and not df_segments.empty:
@@ -407,13 +410,22 @@ def build_excel_table1_view(
             info = df_orders[cols].copy() if all(c in df_orders.columns for c in cols) else df_orders[["id", "updated_at"]].copy()
             if "contract_id" not in info.columns:
                 info["contract_id"] = None
-            return build_table1_from_segments_fn(df_segments, custom_settings, df_orders_info=info)
+            return build_table1_from_segments_fn(
+                df_segments,
+                custom_settings,
+                df_orders_info=info,
+                include_daily_columns=include_daily_columns,
+            )
         conn = get_db_connection_fn()
         try:
             df_seg = pd.read_sql("SELECT * FROM ad_flight_segments", conn)
             conn.close()
             if not df_seg.empty:
-                return build_table1_from_segments_fn(df_seg, custom_settings)
+                return build_table1_from_segments_fn(
+                    df_seg,
+                    custom_settings,
+                    include_daily_columns=include_daily_columns,
+                )
         except Exception:
             conn.close()
 
@@ -449,17 +461,18 @@ def build_excel_table1_view(
     df["提交日"] = pd.to_datetime(df["updated_at"], errors="coerce").dt.strftime("%Y/%m/%d")
     df["提交日"] = df["提交日"].fillna("")
 
-    all_dates = set()
-    for _, row in df.iterrows():
-        if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
-            all_dates.update(pd.date_range(row["start_date"], row["end_date"], freq="D"))
     date_column_names = []
     weekday_map = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
-    if all_dates:
-        for d in sorted(all_dates):
-            date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
-            if date_key not in date_column_names:
-                date_column_names.append(date_key)
+    if include_daily_columns:
+        all_dates = set()
+        for _, row in df.iterrows():
+            if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
+                all_dates.update(pd.date_range(row["start_date"], row["end_date"], freq="D"))
+        if all_dates:
+            for d in sorted(all_dates):
+                date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
+                if date_key not in date_column_names:
+                    date_column_names.append(date_key)
 
     result_rows = []
     for idx, row in df.iterrows():
@@ -496,15 +509,16 @@ def build_excel_table1_view(
         base_row["總秒數"] = df.loc[idx, "總秒數"]
         base_row["店數"] = df.loc[idx, "店數"]
         base_row["使用總秒數"] = df.loc[idx, "使用總秒數"]
-        for date_key in date_column_names:
-            base_row[date_key] = ""
-        if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
-            date_range = pd.date_range(row["start_date"], row["end_date"], freq="D")
-            daily_spots = df.loc[idx, "每天總檔次"]
-            for d in date_range:
-                date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
-                if date_key in date_column_names:
-                    base_row[date_key] = daily_spots
+        if include_daily_columns:
+            for date_key in date_column_names:
+                base_row[date_key] = ""
+            if pd.notna(row["start_date"]) and pd.notna(row["end_date"]):
+                date_range = pd.date_range(row["start_date"], row["end_date"], freq="D")
+                daily_spots = df.loc[idx, "每天總檔次"]
+                for d in date_range:
+                    date_key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
+                    if date_key in date_column_names:
+                        base_row[date_key] = daily_spots
         result_rows.append(base_row)
 
     df_excel = pd.DataFrame(result_rows)

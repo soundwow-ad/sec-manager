@@ -46,7 +46,23 @@ def render_table1_tab(
         value=False,
         key="table1_use_segments",
     )
-    cache_key = (db_mtime, use_segments)
+
+    table1_default_index = 0  # 為了速度：預設先不產生日/日期欄位（更接近 1s 體感）
+    view_mode = st.radio(
+        "顯示模式",
+        ["精簡", "行政", "完整"],
+        format_func=lambda x: {
+            "精簡": "① 精簡（業務：合約/客戶/平台/秒數/檔次/起訖/使用秒數）",
+            "行政": "② 行政（+ 日期欄位、店數、委刊總檔數）",
+            "完整": "③ 完整（全部欄位）",
+        }[x],
+        index=table1_default_index,
+        horizontal=True,
+        key="table1_view_mode",
+    )
+    include_daily_columns = view_mode != "精簡"
+
+    cache_key = (db_mtime, use_segments, view_mode)
 
     if st.session_state.get("_table1_cache_key") == cache_key and "_table1_cache" in st.session_state:
         df_table1 = st.session_state["_table1_cache"]
@@ -56,6 +72,7 @@ def render_table1_tab(
             custom_settings,
             use_segments=use_segments,
             df_segments=df_seg_main,
+            include_daily_columns=include_daily_columns,
         )
         st.session_state["_table1_cache"] = df_table1
         st.session_state["_table1_cache_key"] = cache_key
@@ -139,15 +156,6 @@ def render_table1_tab(
     if sel_client != "全部" and client_col_filter in df_filtered.columns:
         df_filtered = df_filtered[df_filtered[client_col_filter].astype(str) == sel_client]
 
-    table1_default_index = 2 if role == "行政主管" else 0
-    view_mode = st.radio(
-        "顯示模式",
-        ["精簡", "行政", "完整"],
-        format_func=lambda x: {"精簡": "① 精簡（業務：合約/客戶/平台/秒數/檔次/起訖/使用秒數）", "行政": "② 行政（+ 日期欄位、店數、委刊總檔數）", "完整": "③ 完整（全部欄位）"}[x],
-        index=table1_default_index,
-        horizontal=True,
-        key="table1_view_mode",
-    )
     client_col = "客戶" if "客戶" in df_filtered.columns else "HYUNDAI_CUSTIN"
     cols_simple = [c for c in ["業務", "合約編號", client_col, "媒體平台", "秒數", "每天總檔次", "起始日", "終止日", "使用總秒數"] if c in df_filtered.columns]
     date_cols_t1 = [c for c in df_filtered.columns if re.match(r"^\d{1,2}/\d{1,2}\([一二三四五六日]\)$", str(c))]

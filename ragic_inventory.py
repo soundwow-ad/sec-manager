@@ -743,16 +743,28 @@ def _build_visualization_summary_pdf(annual_viz, summary_year):
         annual_summary_entity_labels=ANNUAL_SUMMARY_ENTITY_LABELS,
     )
 
-def _build_table1_from_segments(df_segments: pd.DataFrame, custom_settings=None, df_orders_info=None) -> pd.DataFrame:
+def _build_table1_from_segments(
+    df_segments: pd.DataFrame,
+    custom_settings=None,
+    df_orders_info=None,
+    include_daily_columns: bool = True,
+) -> pd.DataFrame:
     return service_build_table1_from_segments(
         df_segments=df_segments,
         custom_settings=custom_settings,
         df_orders_info=df_orders_info,
         get_db_connection_fn=get_db_connection,
         get_media_platform_display_fn=get_media_platform_display,
+        include_daily_columns=include_daily_columns,
     )
 
-def build_excel_table1_view(df_orders: pd.DataFrame, custom_settings=None, use_segments=True, df_segments=None) -> pd.DataFrame:
+def build_excel_table1_view(
+    df_orders: pd.DataFrame,
+    custom_settings=None,
+    use_segments=True,
+    df_segments=None,
+    include_daily_columns: bool = True,
+) -> pd.DataFrame:
     return service_build_excel_table1_view(
         df_orders=df_orders,
         custom_settings=custom_settings,
@@ -763,6 +775,7 @@ def build_excel_table1_view(df_orders: pd.DataFrame, custom_settings=None, use_s
         parse_platform_region_fn=parse_platform_region,
         get_media_platform_display_fn=get_media_platform_display,
         get_store_count_fn=get_store_count,
+        include_daily_columns=include_daily_columns,
     )
 
 # ==========================================
