@@ -83,6 +83,26 @@ def render_ragic_test_tab(
 
     keyword = st.text_input("關鍵字（訂檔單號/客戶/產品/平台 任一包含）", value="")
 
+    # 先顯示 log（避免後續 st.stop 讓使用者看不到）
+    st.markdown("---")
+    st.markdown("#### 🧾 Debug Log（可直接複製貼回）")
+    log_text = "\n".join(st.session_state.get("_ragic_debug_log", []))
+    st.session_state["ragic_debug_log_area"] = log_text
+    st.text_area("log", value=st.session_state.get("ragic_debug_log_area", ""), height=220, key="ragic_debug_log_area")
+    b1, b2 = st.columns([1, 3])
+    with b1:
+        if st.button("清除 log", key="btn_clear_ragic_log"):
+            st.session_state["_ragic_debug_log"] = []
+            st.rerun()
+    with b2:
+        st.download_button(
+            "下載 log.txt",
+            data=(log_text or "").encode("utf-8"),
+            file_name=f"ragic_debug_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            key="download_ragic_log",
+        )
+
     def _deep_collect_excel_tokens(val: Any) -> list[str]:
         """地毯式從 entry 中找出任何 .xlsx/.xls 的 ragic token（含巢狀 dict/list/子表）。"""
         out: list[str] = []
@@ -224,6 +244,11 @@ def render_ragic_test_tab(
                 _log(f"_ragicId sample(head 5)={df['_ragicId'].head(5).tolist()}")
             except Exception:
                 pass
+        # 提供「未篩選」的 id 清單，避免篩選後 df 變空導致無法選單筆
+        try:
+            st.session_state["_ragic_ids_all"] = pd.to_numeric(df["_ragicId"], errors="coerce").dropna().astype(int).tolist() if "_ragicId" in df.columns else []
+        except Exception:
+            st.session_state["_ragic_ids_all"] = []
 
         st.markdown("#### 🔎 解析後表格（前 5 列）")
         st.dataframe(df.head(5), use_container_width=True, hide_index=True)
@@ -285,16 +310,13 @@ def render_ragic_test_tab(
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.markdown("#### ② 檢視單筆專案 + 解析 CUE Excel")
-        if "_ragicId" in df.columns:
-            ids = pd.to_numeric(df["_ragicId"], errors="coerce").dropna().astype(int).tolist()
-        else:
-            ids = []
+        ids = st.session_state.get("_ragic_ids_all", [])
         if not ids:
             st.info("抓到的資料沒有 _ragicId，無法進一步解析。")
             _log("無可用 _ragicId")
-            st.stop()
+        else:
+            sel_id = st.selectbox("選擇 _ragicId", options=ids)
 
-        sel_id = st.selectbox("選擇 _ragicId", options=ids)
         # listing 有時不含檔案欄位，改抓單筆 entry 取得完整欄位（含附件/子表）
         single_url = make_single_record_url(ref, sel_id)
         _log(f"single record url={single_url}")
@@ -314,110 +336,90 @@ def render_ragic_test_tab(
 
         if not entry or not isinstance(entry, dict):
             st.warning("找不到該筆 entry（單筆/列表皆失敗）。")
-            st.stop()
-
-        show_fields = [
-            "訂檔單號",
-            "客戶",
-            "產品名稱",
-            "平台",
-            "波段",
-            "總波段",
-            "執行開始日期",
-            "執行結束日期",
-            "CUE表秒數",
-            "CUE表總檔數",
-            "訂檔CUE表",
-        ]
-        info = {}
-        for k in show_fields:
-            fid = ragic_fields.get(k)
-            info[k] = entry.get(fid) if fid and fid in entry else entry.get(k)
-        st.json(info)
-
-        cue_fid = ragic_fields.get("訂檔CUE表")
-        cue_val = entry.get(cue_fid) if cue_fid and cue_fid in entry else entry.get("訂檔CUE表")
-        cue_tokens = parse_file_tokens(cue_val)
-        # 只解析 Excel；若只有 JPG/PDF，先提示
-        excel_tokens = [t for t in cue_tokens if str(t).lower().endswith((".xlsx", ".xls"))]
-        if not excel_tokens:
-            # 單筆也做一次地毯式掃描，避免 Excel 放在其他欄位/子表
-            excel_tokens = _scan_entry_excel(entry)
-        if not cue_tokens:
-            st.info("此筆沒有「訂檔CUE表」檔案。")
         else:
-            st.markdown(f"**訂檔CUE表檔案數：{len(cue_tokens)}**")
-            for i, tok in enumerate(cue_tokens, start=1):
-                st.markdown(f"- 檔案{i}：`{tok}`")
+            show_fields = [
+                "訂檔單號",
+                "客戶",
+                "產品名稱",
+                "平台",
+                "波段",
+                "總波段",
+                "執行開始日期",
+                "執行結束日期",
+                "CUE表秒數",
+                "CUE表總檔數",
+                "訂檔CUE表",
+            ]
+            info = {}
+            for k in show_fields:
+                fid = ragic_fields.get(k)
+                info[k] = entry.get(fid) if fid and fid in entry else entry.get(k)
+            st.json(info)
+
+            cue_fid = ragic_fields.get("訂檔CUE表")
+            cue_val = entry.get(cue_fid) if cue_fid and cue_fid in entry else entry.get("訂檔CUE表")
+            cue_tokens = parse_file_tokens(cue_val)
+            # 只解析 Excel；若只有 JPG/PDF，先提示
+            excel_tokens = [t for t in cue_tokens if str(t).lower().endswith((".xlsx", ".xls"))]
             if not excel_tokens:
-                st.warning("此筆「訂檔CUE表」沒有 Excel（.xlsx/.xls）。目前抓到的檔案可能是 JPG/PDF（例如報價單），因此不會進行 CUE 解析。")
+                # 單筆也做一次地毯式掃描，避免 Excel 放在其他欄位/子表
+                excel_tokens = _scan_entry_excel(entry)
+            if not cue_tokens:
+                st.info("此筆沒有「訂檔CUE表」檔案。")
+            else:
+                st.markdown(f"**訂檔CUE表檔案數：{len(cue_tokens)}**")
+                for i, tok in enumerate(cue_tokens, start=1):
+                    st.markdown(f"- 檔案{i}：`{tok}`")
+                if not excel_tokens:
+                    st.warning("此筆「訂檔CUE表」沒有 Excel（.xlsx/.xls）。目前抓到的檔案可能是 JPG/PDF（例如報價單），因此不會進行 CUE 解析。")
 
-            parse_now = st.checkbox("立即下載並解析 CUE Excel", value=True)
-            if parse_now and excel_tokens:
-                for i, tok in enumerate(excel_tokens, start=1):
-                    with st.expander(f"解析 檔案{i}"):
-                        content, derr = download_file(ref, tok, api_key, timeout=120)
-                        if derr:
-                            st.error(f"下載失敗：{derr}")
-                            _log(f"下載失敗 token={tok} err={derr}")
-                            continue
-                        cue_units = parse_cue_excel_for_table1(content, order_info=None)
-                        st.markdown(f"解析出 ad_unit 筆數：**{len(cue_units)}**")
-                        if cue_units:
-                            df_units = pd.DataFrame(
-                                [
-                                    {
-                                        "platform": u.get("platform"),
-                                        "region": u.get("region"),
-                                        "seconds": u.get("seconds"),
-                                        "start_date": u.get("start_date"),
-                                        "end_date": u.get("end_date"),
-                                        "days": u.get("days"),
-                                        "total_spots": u.get("total_spots"),
-                                        "source_sheet": u.get("source_sheet"),
-                                        "split_reason": u.get("split_reason"),
-                                    }
-                                    for u in cue_units
-                                ]
-                            )
-                            st.dataframe(df_units, use_container_width=True, hide_index=True)
-
-                            sample = []
-                            for u in cue_units[:10]:
-                                ds = u.get("daily_spots") or []
-                                dts = u.get("dates") or []
-                                sample.append(
-                                    {
-                                        "platform": u.get("platform"),
-                                        "region": u.get("region"),
-                                        "seconds": u.get("seconds"),
-                                        "dates(head)": dts[:7],
-                                        "daily_spots(head)": ds[:7],
-                                    }
+                parse_now = st.checkbox("立即下載並解析 CUE Excel", value=True)
+                if parse_now and excel_tokens:
+                    for i, tok in enumerate(excel_tokens, start=1):
+                        with st.expander(f"解析 檔案{i}"):
+                            content, derr = download_file(ref, tok, api_key, timeout=120)
+                            if derr:
+                                st.error(f"下載失敗：{derr}")
+                                _log(f"下載失敗 token={tok} err={derr}")
+                                continue
+                            cue_units = parse_cue_excel_for_table1(content, order_info=None)
+                            st.markdown(f"解析出 ad_unit 筆數：**{len(cue_units)}**")
+                            if cue_units:
+                                df_units = pd.DataFrame(
+                                    [
+                                        {
+                                            "platform": u.get("platform"),
+                                            "region": u.get("region"),
+                                            "seconds": u.get("seconds"),
+                                            "start_date": u.get("start_date"),
+                                            "end_date": u.get("end_date"),
+                                            "days": u.get("days"),
+                                            "total_spots": u.get("total_spots"),
+                                            "source_sheet": u.get("source_sheet"),
+                                            "split_reason": u.get("split_reason"),
+                                        }
+                                        for u in cue_units
+                                    ]
                                 )
-                            st.markdown("**每日檔次（前 7 天抽樣 / 前 10 筆）**")
-                            st.dataframe(pd.DataFrame(sample), use_container_width=True, hide_index=True)
-                        else:
-                            st.warning("此檔案沒有解析出每日檔次（可能不是預期版型或內容全空）。")
+                                st.dataframe(df_units, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
-    st.markdown("#### 🧾 Debug Log（可直接複製貼回）")
-    log_text = "\n".join(st.session_state.get("_ragic_debug_log", []))
-    st.session_state["ragic_debug_log_area"] = log_text
-    st.text_area("log", value=st.session_state.get("ragic_debug_log_area", ""), height=220, key="ragic_debug_log_area")
-    b1, b2 = st.columns([1, 3])
-    with b1:
-        if st.button("清除 log", key="btn_clear_ragic_log"):
-            st.session_state["_ragic_debug_log"] = []
-            st.rerun()
-    with b2:
-        st.download_button(
-            "下載 log.txt",
-            data=(log_text or "").encode("utf-8"),
-            file_name=f"ragic_debug_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain",
-            key="download_ragic_log",
-        )
+                                sample = []
+                                for u in cue_units[:10]:
+                                    ds = u.get("daily_spots") or []
+                                    dts = u.get("dates") or []
+                                    sample.append(
+                                        {
+                                            "platform": u.get("platform"),
+                                            "region": u.get("region"),
+                                            "seconds": u.get("seconds"),
+                                            "dates(head)": dts[:7],
+                                            "daily_spots(head)": ds[:7],
+                                        }
+                                    )
+                                st.markdown("**每日檔次（前 7 天抽樣 / 前 10 筆）**")
+                                st.dataframe(pd.DataFrame(sample), use_container_width=True, hide_index=True)
+                            else:
+                                st.warning("此檔案沒有解析出每日檔次（可能不是預期版型或內容全空）。")
 
     # 額外：將「最後一次掃描到的 Excel token」提供複製（方便回報）
     st.markdown("#### 📎 最後一次 Excel 掃描結果（可複製）")
