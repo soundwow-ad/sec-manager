@@ -274,7 +274,7 @@ def render_order_crud_panel(
         offset_val = (int(page_no) - 1) * int(page_size)
         order_by = "updated_at DESC, id DESC" if sort_desc else "updated_at ASC, id ASC"
         sql_page = f"""
-            SELECT id, contract_id, platform, client, product, start_date, end_date, seconds, spots, amount_net, updated_at
+            SELECT id, contract_id, platform, client, product, start_date, end_date, seconds, spots, seconds_type, amount_net, updated_at
             FROM orders
             {where_sql}
             ORDER BY {order_by}
@@ -283,9 +283,75 @@ def render_order_crud_panel(
         df_page = pd.read_sql(sql_page, conn_list, params=[*params, int(page_size), int(offset_val)])
         conn_list.close()
 
+        # 顯示秒數用途以供快速編輯（不影響原本「編輯所選」流程）
+        if "seconds_type" not in df_page.columns:
+            # 舊資料庫可能尚未填滿 seconds_type；補上欄位避免 UI crash
+            df_page["seconds_type"] = ""
+
         st.dataframe(styler_one_decimal(df_page), use_container_width=True, height=360, hide_index=True)
 
         options = df_page["id"].astype(str).tolist() if not df_page.empty else []
+
+        st.markdown("---")
+        st.subheader("秒數用途快速編輯（立即同步 Google Sheet）")
+        st.caption("選擇一筆訂單、指定秒數用途後，按下套用即可更新 DB 並同步到試算表。")
+
+        crud_seconds_target_id = st.selectbox(
+            "要編輯的訂單 ID",
+            options=options,
+            key="crud_seconds_target_id",
+        )
+
+        current_seconds_type = ""
+        try:
+            row_match = df_page[df_page["id"].astype(str) == str(crud_seconds_target_id)]
+            if not row_match.empty:
+                current_seconds_type = str(row_match.iloc[0].get("seconds_type", "") or "")
+        except Exception:
+            current_seconds_type = ""
+
+        seconds_type_index = list(seconds_usage_types).index(current_seconds_type) if current_seconds_type in seconds_usage_types else 0
+        new_seconds_type = st.selectbox(
+            "新的秒數用途",
+            options=list(seconds_usage_types),
+            index=seconds_type_index,
+            key="crud_seconds_new_type",
+        )
+
+        auto_sync = st.checkbox("套用後立即同步到 Google Sheet", value=True, key="crud_seconds_auto_sync")
+        if st.button("套用並同步", type="primary", disabled=(not crud_seconds_target_id), key="crud_btn_apply_seconds_type_single"):
+            now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn_upd = get_db_connection()
+            try:
+                conn_upd.execute(
+                    "UPDATE orders SET seconds_type=?, updated_at=? WHERE id=?",
+                    (new_seconds_type, now_ts, crud_seconds_target_id),
+                )
+                conn_upd.execute(
+                    """
+                    UPDATE ad_flight_segments
+                    SET seconds_type=?,
+                        updated_at=?
+                    WHERE source_order_id=?
+                    """,
+                    (new_seconds_type, now_ts, crud_seconds_target_id),
+                )
+                conn_upd.commit()
+            except Exception as e:
+                conn_upd.rollback()
+                st.error(f"秒數用途更新失敗：{e}")
+                conn_upd.close()
+                st.stop()
+            conn_upd.close()
+
+            if auto_sync:
+                errs = sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=False)
+                if errs:
+                    st.error("Google Sheet 同步失敗：" + "; ".join(errs[:3]))
+            if "_table1_cache_key" in st.session_state:
+                del st.session_state["_table1_cache_key"]
+            st.success("✅ 已更新秒數用途。")
+            st.rerun()
         sel_id = st.selectbox("選取一筆訂單 ID", options=options, key="crud_select_id")
         op1, op2 = st.columns(2)
         with op1:
