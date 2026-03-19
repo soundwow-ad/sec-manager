@@ -136,6 +136,83 @@ RAGIC_SUBTABLE_FIELDS = {
     "素材_文案": "1015382",
 }
 
+
+def _ragic_make_api_url(host: str, account: str, tab_folder: str, sheet_index: str, record_id: str | None = None) -> str:
+    """
+    Ragic API endpoint（v3）格式：
+    `https://<host>/<account>/<tab_folder>/<sheet>/<record>?v=3&api`
+    參考：[Finding API endpoints](https://www.ragic.com/intl/en/doc-api/7/Finding-API-endpoints)
+    """
+    base = f"https://{host.strip().strip('/')}/{account.strip().strip('/')}/{tab_folder.strip().strip('/')}/{str(sheet_index).strip().strip('/')}"
+    if record_id is not None and str(record_id).strip() != "":
+        base = base + f"/{str(record_id).strip()}"
+    return base + "?v=3&api"
+
+
+def _ragic_auth_headers(api_key: str) -> dict:
+    return {"Authorization": f"Basic {api_key.strip()}"}
+
+
+def ragic_api_get_json(url: str, api_key: str, params: dict | None = None, timeout: int = 30):
+    """Ragic API GET -> json（錯誤時回傳 (None, error_str)）"""
+    try:
+        r = requests.get(url, headers=_ragic_auth_headers(api_key), params=params or {}, timeout=timeout)
+        r.raise_for_status()
+        return r.json(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _ragic_extract_entries(payload: dict) -> list[dict]:
+    """將 listing payload（key 為 ragicId 的 dict）轉成 list[entry]"""
+    if not isinstance(payload, dict):
+        return []
+    out = []
+    for _, entry in payload.items():
+        if isinstance(entry, dict) and entry.get("_ragicId") is not None:
+            out.append(entry)
+    return out
+
+
+def _ragic_parse_file_tokens(v) -> list[str]:
+    """
+    Ragic 檔案欄位在 API 回傳可能是：
+    - 單一字串：`Ni92W2luv@My.xlsx`
+    - 多檔：用換行或逗號分隔（依欄位設定而異）
+    """
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return []
+    if isinstance(v, (list, tuple)):
+        tokens = []
+        for x in v:
+            tokens.extend(_ragic_parse_file_tokens(x))
+        return [t for t in tokens if t]
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return []
+    parts = re.split(r"[\n,]+", s)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def ragic_download_file(host: str, account: str, file_token: str, api_key: str, timeout: int = 60):
+    """
+    下載 Ragic 檔案欄位（file upload field）內容。
+    下載格式參考：[Retrieving uploaded files](https://www.ragic.com/intl/en/doc-api/28)
+
+    `https://<host>/sims/file.jsp?a=<account>&f=<token>`
+    """
+    try:
+        from urllib.parse import quote
+        token = str(file_token).strip()
+        if not token:
+            return None, "empty token"
+        url = f"https://{host.strip().strip('/')}/sims/file.jsp?a={account.strip()}&f={quote(token)}"
+        r = requests.get(url, headers=_ragic_auth_headers(api_key), timeout=timeout)
+        r.raise_for_status()
+        return r.content, None
+    except Exception as e:
+        return None, str(e)
+
 # ==========================================
 # 2. 核心邏輯區 (Core Logic)
 # ==========================================
@@ -4701,7 +4778,7 @@ if df_daily.empty and not df_orders.empty:
         df_daily = _explode_segments_to_daily_cached(df_seg_main) if not df_seg_main.empty else pd.DataFrame()
 
 # --- 分頁呈現（角色導向入口 + 只渲染當前分頁）---
-TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "📊 ROI", "🧪 實驗分頁"]
+TAB_OPTIONS = ["📋 表1-資料", "📅 表2-秒數明細", "📊 表3-每日庫存", "📉 總結表圖表", "📊 分公司×媒體 每月秒數", "📋 媒體秒數與採購", "📊 ROI", "🧪 Ragic抓取測試", "🧪 實驗分頁"]
 # 各角色可見分頁：行政主管=全部(預設)、業務=表1+表3(唯讀)、總經理=總結表+表3+表2+分公司×媒體+ROI+實驗(不呈現表1、不呈現媒體秒數與採購)
 TAB_OPTIONS_BY_ROLE = {
     "行政主管": TAB_OPTIONS,  # 擁有所有權限，預設角色
@@ -5982,6 +6059,192 @@ elif selected_tab == "📋 媒體秒數與採購":
             st.rerun()
     st.markdown("---")
     st.caption("儲存後，ROI 分頁將依「購買價格 ÷ 購買秒數」計算成本並產生投報率。")
+
+elif selected_tab == "🧪 Ragic抓取測試":
+    st.markdown("### 🧪 Ragic 抓取資料測試（導入前驗證用）")
+    st.caption("可選擇抓取筆數/offset/日期區間，並顯示每筆專案欄位與 CUE Excel 解析結果（含波段拆分）。")
+
+    # 從「訂檔網址」推導 host/account/tab/sheet
+    default_ragic_url = "https://ap13.ragic.com/soundwow/forms12/17"
+    ragic_url = st.text_input("訂檔表單（Listing/Sheet）網址", value=default_ragic_url, help="格式類似：https://ap13.ragic.com/soundwow/forms12/17")
+    api_key_default = ""
+    try:
+        api_key_default = st.secrets.get("RAGIC_API_KEY", "")
+    except Exception:
+        api_key_default = ""
+    api_key = st.text_input("Ragic API Key", value=api_key_default, type="password", help="不會顯示內容；建議放在 .streamlit/secrets.toml 的 RAGIC_API_KEY")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        limit = st.number_input("抓取筆數 limit", min_value=1, max_value=2000, value=50, step=10)
+    with c2:
+        offset = st.number_input("起始 offset", min_value=0, max_value=200000, value=0, step=50)
+    with c3:
+        subtables0 = st.checkbox("不抓子表（subtables=0）", value=True)
+
+    filter_field = st.selectbox("日期篩選欄位（抓回後在本機篩）", options=["不篩", "建立日期", "執行開始日期", "執行結束日期"], index=0)
+    fcol1, fcol2 = st.columns(2)
+    with fcol1:
+        date_from = st.date_input("日期起", value=None)
+    with fcol2:
+        date_to = st.date_input("日期迄", value=None)
+
+    keyword = st.text_input("關鍵字（訂檔單號/客戶/產品/平台 任一包含）", value="")
+
+    def _parse_ragic_sheet_url(url: str):
+        try:
+            from urllib.parse import urlparse
+            u = urlparse((url or "").strip())
+            host = u.netloc or "ap13.ragic.com"
+            parts = [p for p in (u.path or "").split("/") if p]
+            # /soundwow/forms12/17
+            if len(parts) >= 3:
+                return host, parts[0], parts[1], parts[2]
+        except Exception:
+            pass
+        return "ap13.ragic.com", "soundwow", "forms12", "17"
+
+    def _entry_to_row(e: dict):
+        def g(name):
+            fid = RAGIC_FIELDS.get(name)
+            if not fid:
+                return ""
+            return e.get(fid, "")
+        cue_fid = RAGIC_FIELDS.get("訂檔CUE表")
+        cue_tokens = _ragic_parse_file_tokens(e.get(cue_fid)) if cue_fid else []
+        return {
+            "_ragicId": e.get("_ragicId"),
+            "訂檔單號": g("訂檔單號"),
+            "客戶": g("客戶"),
+            "產品名稱": g("產品名稱"),
+            "平台": g("平台"),
+            "波段": g("波段"),
+            "總波段": g("總波段"),
+            "執行開始日期": g("執行開始日期"),
+            "執行結束日期": g("執行結束日期"),
+            "CUE表秒數": g("CUE表秒數"),
+            "CUE表總檔數": g("CUE表總檔數"),
+            "訂檔CUE表(檔案數)": len(cue_tokens),
+        }
+
+    def _to_date(v):
+        try:
+            dt = pd.to_datetime(v, errors="coerce")
+            return None if pd.isna(dt) else dt.date()
+        except Exception:
+            return None
+
+    fetch_btn = st.button("🚀 抓取並顯示", type="primary")
+    if fetch_btn:
+        if not api_key.strip():
+            st.error("請輸入 Ragic API Key（可放 .streamlit/secrets.toml 的 RAGIC_API_KEY）。")
+            st.stop()
+        host, account, tab_folder, sheet_index = _parse_ragic_sheet_url(ragic_url)
+        api_url = _ragic_make_api_url(host, account, tab_folder, sheet_index)
+        params = {"limit": int(limit), "offset": int(offset)}
+        if subtables0:
+            params["subtables"] = 0
+
+        payload, err = ragic_api_get_json(api_url, api_key, params=params, timeout=60)
+        if err:
+            st.error(f"抓取失敗：{err}")
+            st.stop()
+        entries = _ragic_extract_entries(payload)
+        if not entries:
+            st.warning("沒有抓到任何資料（可能沒有權限或資料為空）。")
+            st.stop()
+
+        rows = [_entry_to_row(e) for e in entries]
+        df = pd.DataFrame(rows)
+
+        # 本機日期篩選
+        if filter_field != "不篩" and (date_from or date_to):
+            col = filter_field
+            df[col + "_date"] = df[col].apply(_to_date)
+            if date_from:
+                df = df[df[col + "_date"].notna() & (df[col + "_date"] >= date_from)]
+            if date_to:
+                df = df[df[col + "_date"].notna() & (df[col + "_date"] <= date_to)]
+
+        # 關鍵字篩選
+        if keyword.strip():
+            kw = keyword.strip()
+            mask = False
+            for c in ["訂檔單號", "客戶", "產品名稱", "平台"]:
+                if c in df.columns:
+                    mask = mask | df[c].astype(str).fillna("").str.contains(kw, regex=False)
+            df = df[mask]
+
+        st.markdown("#### ① 抓取結果（專案清單）")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### ② 檢視單筆專案 + 解析 CUE Excel")
+        ids = df["_ragicId"].dropna().astype(int).tolist() if "_ragicId" in df.columns else []
+        if not ids:
+            st.info("抓到的資料沒有 _ragicId，無法進一步解析。")
+            st.stop()
+        sel_id = st.selectbox("選擇 _ragicId", options=ids)
+        entry = next((e for e in entries if int(e.get("_ragicId", -1)) == int(sel_id)), None)
+        if not entry:
+            st.warning("找不到該筆 entry。")
+            st.stop()
+
+        # 顯示主欄位（用流水號對照）
+        show_fields = ["訂檔單號", "客戶", "產品名稱", "平台", "波段", "總波段", "執行開始日期", "執行結束日期", "CUE表秒數", "CUE表總檔數", "訂檔CUE表"]
+        info = {}
+        for k in show_fields:
+            fid = RAGIC_FIELDS.get(k)
+            info[k] = entry.get(fid) if fid else None
+        st.json(info)
+
+        cue_fid = RAGIC_FIELDS.get("訂檔CUE表")
+        cue_tokens = _ragic_parse_file_tokens(entry.get(cue_fid)) if cue_fid else []
+        if not cue_tokens:
+            st.info("此筆沒有「訂檔CUE表」檔案。")
+        else:
+            st.markdown(f"**訂檔CUE表檔案數：{len(cue_tokens)}**")
+            for i, tok in enumerate(cue_tokens, start=1):
+                st.markdown(f"- 檔案{i}：`{tok}`")
+
+            parse_now = st.checkbox("立即下載並解析 CUE Excel", value=True)
+            if parse_now:
+                for i, tok in enumerate(cue_tokens, start=1):
+                    with st.expander(f"解析 檔案{i}"):
+                        content, derr = ragic_download_file(host, account, tok, api_key, timeout=120)
+                        if derr:
+                            st.error(f"下載失敗：{derr}")
+                            continue
+                        cue_units = parse_cue_excel_for_table1(content, order_info=None)
+                        st.markdown(f"解析出 ad_unit 筆數：**{len(cue_units)}**")
+                        if cue_units:
+                            df_units = pd.DataFrame([{
+                                "platform": u.get("platform"),
+                                "region": u.get("region"),
+                                "seconds": u.get("seconds"),
+                                "start_date": u.get("start_date"),
+                                "end_date": u.get("end_date"),
+                                "days": u.get("days"),
+                                "total_spots": u.get("total_spots"),
+                                "source_sheet": u.get("source_sheet"),
+                                "split_reason": u.get("split_reason"),
+                            } for u in cue_units])
+                            st.dataframe(df_units, use_container_width=True, hide_index=True)
+                            # 也顯示每日檔次前幾天方便肉眼核對
+                            sample = []
+                            for u in cue_units[:10]:
+                                ds = u.get("daily_spots") or []
+                                dts = u.get("dates") or []
+                                sample.append({
+                                    "platform": u.get("platform"),
+                                    "region": u.get("region"),
+                                    "seconds": u.get("seconds"),
+                                    "dates(head)": dts[:7],
+                                    "daily_spots(head)": ds[:7],
+                                })
+                            st.markdown("**每日檔次（前 7 天抽樣 / 前 10 筆）**")
+                            st.dataframe(pd.DataFrame(sample), use_container_width=True, hide_index=True)
+                        else:
+                            st.warning("此檔案沒有解析出每日檔次（可能不是預期版型或內容全空）。")
 
 elif selected_tab == "🧪 實驗分頁":
     # 鎖定分頁：切換「分析對象」等控件會觸發 rerun，避免跳到其他分頁
