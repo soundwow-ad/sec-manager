@@ -195,6 +195,15 @@ def render_ragic_test_tab(
         _log(f"payload type={type(payload).__name__}")
 
         if isinstance(payload, dict):
+            # Ragic 在權限/金鑰不對時，常回傳 {"status":"ERROR"}（HTTP 可能仍是 200）
+            if str(payload.get("status", "")).upper() == "ERROR":
+                st.error("Ragic 回傳 `status=ERROR`（多半是 API Key/權限不足，或 URL 指到無權限的表單）。")
+                try:
+                    st.json(payload)
+                except Exception:
+                    pass
+                _log(f"Ragic payload status=ERROR payload_keys={list(payload.keys())[:20]}")
+                return
             try:
                 k0 = next(iter(payload.keys()), None)
                 st.markdown("#### 🔎 API 原始回傳（前 1 筆）")
@@ -269,7 +278,10 @@ def render_ragic_test_tab(
 
             max_files = st.number_input("本次最多自動解析檔案數", min_value=1, max_value=200, value=min(20, len(listing_excel_rows)), step=5)
             auto_parse = st.checkbox("自動下載並解析掃描到的 Excel", value=True, help="關閉可只看掃描結果，不下載檔案。")
+            details_mode = st.checkbox("產出『表1等級』明細（每日檔次逐日列出）", value=True, help="會把解析到的每日檔次展開成逐日明細，方便檢視；資料量大時會比較慢。")
             parsed_rows = []
+            unit_rows = []
+            daily_rows = []
             if auto_parse:
                 # 展平成檔案清單（保留對應 ragicId/訂檔單號）
                 file_jobs = []
@@ -351,6 +363,43 @@ def render_ragic_test_tab(
                             total_spots_sum = int(sum([int(u.get("total_spots") or 0) for u in cue_units]))
                         except Exception:
                             total_spots_sum = 0
+
+                        # 表1等級明細：單位層 + 逐日層
+                        if cue_units:
+                            for u in cue_units:
+                                unit_rows.append(
+                                    {
+                                        **job,
+                                        "source_sheet": u.get("source_sheet"),
+                                        "source_row": u.get("source_row"),
+                                        "platform": u.get("platform"),
+                                        "region": u.get("region"),
+                                        "seconds": u.get("seconds"),
+                                        "ad_name": u.get("ad_name"),
+                                        "start_date": u.get("start_date"),
+                                        "end_date": u.get("end_date"),
+                                        "days": u.get("days"),
+                                        "total_spots": u.get("total_spots"),
+                                        "split_reason": u.get("split_reason"),
+                                    }
+                                )
+                                if details_mode:
+                                    dts = u.get("dates") or []
+                                    dss = u.get("daily_spots") or []
+                                    n = min(len(dts), len(dss))
+                                    for i2 in range(n):
+                                        daily_rows.append(
+                                            {
+                                                **job,
+                                                "source_sheet": u.get("source_sheet"),
+                                                "platform": u.get("platform"),
+                                                "region": u.get("region"),
+                                                "seconds": u.get("seconds"),
+                                                "ad_name": u.get("ad_name"),
+                                                "date": dts[i2],
+                                                "daily_spots": dss[i2],
+                                            }
+                                        )
                         parsed_rows.append({
                             **job,
                             "status": "ok",
@@ -371,6 +420,28 @@ def render_ragic_test_tab(
                 if parsed_rows:
                     st.dataframe(pd.DataFrame(parsed_rows), use_container_width=True, hide_index=True)
                     st.caption("`sample_daily_spots/sample_dates` 為第一個 ad_unit 的前 14 天抽樣，方便快速核對每日檔次。")
+                    if unit_rows:
+                        st.markdown("#### ⑤ 表1-解析明細（單位層，類似表1）")
+                        df_units_all = pd.DataFrame(unit_rows)
+                        st.dataframe(df_units_all, use_container_width=True, hide_index=True)
+                        st.download_button(
+                            "下載 解析明細-單位層.csv",
+                            data=df_units_all.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"ragic_parse_units_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            key="dl_units_csv",
+                        )
+                    if details_mode and daily_rows:
+                        st.markdown("#### ⑥ 表1-解析明細（逐日層：每日檔次）")
+                        df_daily_all = pd.DataFrame(daily_rows)
+                        st.dataframe(df_daily_all, use_container_width=True, hide_index=True)
+                        st.download_button(
+                            "下載 解析明細-逐日層.csv",
+                            data=df_daily_all.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"ragic_parse_daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            key="dl_daily_csv",
+                        )
                 else:
                     st.info("沒有可解析的 Excel token（或尚未啟用自動解析）。")
         else:

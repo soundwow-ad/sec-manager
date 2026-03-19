@@ -58,9 +58,19 @@ def make_single_record_url(ref: RagicSheetRef, record_id: str | int) -> str:
 def get_json(url: str, api_key: str, *, timeout: int = 60) -> tuple[dict[str, Any] | None, str | None]:
     try:
         r = requests.get(url, headers=auth_headers(api_key), timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        return (data if isinstance(data, dict) else None), None
+        ct = (r.headers.get("content-type") or "").lower()
+        status = r.status_code
+        text_snip = (r.text or "")[:600]
+        if status >= 400:
+            return None, f"http {status} {r.reason} body(head600)={text_snip}"
+        # 某些情境 content-type 不是 json，但 body 仍是 json 字串
+        try:
+            data = r.json()
+        except Exception:
+            return None, f"non-json response http {status} ct={ct} body(head600)={text_snip}"
+        if isinstance(data, dict):
+            return data, None
+        return None, f"json is not dict: {type(data).__name__}"
     except Exception as e:
         return None, str(e)
 

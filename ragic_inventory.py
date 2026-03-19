@@ -1101,21 +1101,69 @@ def parse_cueapp_excel(file_content):
             if fmt == 'dongwu':
                 b5 = df.iloc[4, 1] if df.shape[1] > 1 else None
                 start_date, end_date = _parse_cueapp_period_dongwu(b5)
-                if not start_date or not end_date:
-                    continue
-                date_start_col = 7
-                header_row_idx = 6
-                # 找「檔次」欄：通常在最右側日期欄之後
-                for c in range(df.shape[1] - 1, date_start_col - 1, -1):
-                    try:
-                        val = str(df.iloc[header_row_idx, c]).strip() + str(df.iloc[header_row_idx + 1, c]).strip()
-                        if '檔次' in val:
-                            eff_days = c - date_start_col
-                            break
-                    except IndexError:
+                if start_date and end_date:
+                    date_start_col = 7
+                    header_row_idx = 6
+                    # 找「檔次」欄：通常在最右側日期欄之後
+                    for c in range(df.shape[1] - 1, date_start_col - 1, -1):
+                        try:
+                            val = str(df.iloc[header_row_idx, c]).strip() + str(df.iloc[header_row_idx + 1, c]).strip()
+                            if '檔次' in val:
+                                eff_days = c - date_start_col
+                                break
+                        except IndexError:
+                            continue
+                    if eff_days is None:
+                        eff_days = max(0, df.shape[1] - date_start_col - 1)
+                else:
+                    # 有些「Media Schedule」不是 dongwu 連續日期版，而是 Schedule 日數欄（30/31/1/2...）
+                    header_row_idx = _find_schedule_header_row(df)
+                    if header_row_idx is None:
                         continue
-                if eff_days is None:
-                    eff_days = max(0, df.shape[1] - date_start_col - 1)
+                    sec_col = None
+                    for j in range(min(25, df.shape[1])):
+                        s = str(df.iloc[header_row_idx, j]).strip()
+                        if ('秒數' in s) or (s.lower() == 'size') or ('size' in s.lower()):
+                            sec_col = j
+                            break
+                    if sec_col is None:
+                        continue
+                    date_start_col = sec_col + 1
+                    day_cols = []
+                    for j in range(date_start_col, min(df.shape[1], date_start_col + 80)):
+                        d = _parse_day_cell(df.iloc[header_row_idx, j])
+                        if d is None:
+                            if day_cols:
+                                break
+                            continue
+                        day_cols.append((j, d))
+                    if not day_cols:
+                        continue
+                    eff_days = len(day_cols)
+                    # year/month 推導
+                    year = _infer_year_from_df(df) or datetime.now().year
+                    months = []
+                    last_day = None
+                    last_month = None
+                    for (j, d) in day_cols:
+                        mm = _infer_month_for_col(df, header_row_idx, j)
+                        if mm is None:
+                            mm = last_month if last_month is not None else 1
+                        if last_day is not None and d < last_day and (mm == last_month):
+                            mm = 1 if last_month == 12 else (last_month + 1)
+                        months.append(mm)
+                        last_day = d
+                        last_month = mm
+                    dates2 = []
+                    for (_, d), mm in zip(day_cols, months):
+                        try:
+                            dates2.append(date(int(year), int(mm), int(d)))
+                        except Exception:
+                            pass
+                    if not dates2:
+                        continue
+                    start_date = min(dates2)
+                    end_date = max(dates2)
             else:
                 start_date, end_date = _parse_cueapp_period_shenghuo_bolin(df)
                 # Schedule/Media Schedule 常見沒有「檔次」欄，改用「日期數字欄」推導
@@ -1228,7 +1276,8 @@ def parse_cueapp_excel(file_content):
                     date_list = date_list[:eff_days]
                 dates_str = [d.strftime('%Y-%m-%d') for d in date_list]
 
-            data_start_row = header_row_idx + 2
+            # 資料列起點：header 下一列通常是「星期列」，再下一列才是資料；但不同檔案可能多/少一列
+            data_start_row = header_row_idx + 1
             platform_info = _extract_platform_from_sheet(df, sheet_name)
             seconds_info = _extract_seconds_from_sheet(df, sheet_name)
             default_seconds = seconds_info.get('seconds', 0)
@@ -1236,6 +1285,14 @@ def parse_cueapp_excel(file_content):
             for r in range(data_start_row, min(data_start_row + 200, len(df))):
                 row = df.iloc[r]
                 try:
+                    # 跳過「星期列」或空白列：常見在日期欄下出現 '一二三四五六日'
+                    try:
+                        if date_start_col is not None and date_start_col < len(row):
+                            day_marker = str(row.iloc[date_start_col]).strip()
+                            if day_marker in ('一', '二', '三', '四', '五', '六', '日'):
+                                continue
+                    except Exception:
+                        pass
                     e_val = row.iloc[4] if len(row) > 4 else None
                     e_str = str(e_val).strip() if e_val is not None else ''
                     if 'Total' in e_str or 'total' in e_str or e_str == 'Total':
