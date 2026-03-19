@@ -2,8 +2,27 @@
 """共用工具：Excel 輸出、DataFrame 清理、樣式、日期正規化、秒數標籤。"""
 
 import io
+import logging
+import os
+import time
 import numpy as np
 import pandas as pd
+
+
+_TIMING_ENABLED = os.environ.get("SEC_MANAGER_TIMING", "1") == "1"
+
+
+def log_timing(step: str, elapsed_s: float, **meta) -> None:
+    """
+    寫入 Streamlit/console logs 用的計時資訊（預設啟用）。
+    可用環境變數 `SEC_MANAGER_TIMING=0` 關閉。
+    """
+    if not _TIMING_ENABLED:
+        return
+    meta_items = [(k, v) for k, v in meta.items() if v is not None]
+    meta_s = " ".join([f"{k}={v}" for k, v in meta_items])
+    logger = logging.getLogger("secmanager.timing")
+    logger.info(f"[timing] {step} took {elapsed_s:.3f}s{(' ' + meta_s) if meta_s else ''}")
 
 
 def df_to_excel_bytes(df, sheet_name="Sheet1"):

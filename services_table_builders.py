@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 import calendar
 from datetime import datetime, timedelta
+import time
+
+from services_utils import log_timing
 
 
 def build_table1_from_cue_excel(
@@ -117,6 +120,7 @@ def segment_platform_display(seg):
 
 
 def build_table2_summary_by_company(df_segments, df_daily, df_orders, get_media_platform_display_fn, media_platform=None):
+    t_total = time.perf_counter()
     if df_segments.empty or df_daily.empty:
         return pd.DataFrame()
 
@@ -154,18 +158,31 @@ def build_table2_summary_by_company(df_segments, df_daily, df_orders, get_media_
     if "日期" not in df_daily.columns or "使用店秒" not in df_daily.columns or "公司" not in df_daily.columns:
         date_cols = []
     else:
+        t_daily = time.perf_counter()
         daily_agg = df_daily.groupby(["公司", "日期"])["使用店秒"].sum().reset_index()
         daily_agg["日期"] = pd.to_datetime(daily_agg["日期"])
         all_dates = sorted(daily_agg["日期"].dropna().unique())
         weekday_map = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
-        date_cols = [f"{d.month}/{d.day}({weekday_map[d.weekday()]})" for d in all_dates]
-        pivot_daily = daily_agg.pivot(index="公司", columns="日期", values="使用店秒").reindex(companies).fillna(0)
-        for d in all_dates:
-            key = f"{d.month}/{d.day}({weekday_map[d.weekday()]})"
-            if d in pivot_daily.columns:
-                by_company[key] = pivot_daily.loc[by_company["company"], d].fillna(0).astype(int).values
-            else:
-                by_company[key] = 0
+        date_key_by_dt = {d: f"{d.month}/{d.day}({weekday_map[d.weekday()]})" for d in all_dates}
+        date_cols = [date_key_by_dt[d] for d in all_dates]
+        pivot_daily = (
+            daily_agg.pivot(index="公司", columns="日期", values="使用店秒")
+            .reindex(companies)
+            .fillna(0)
+        )
+
+        # 一次性把日期欄位 merge 進 by_company，避免逐欄插入造成 fragmentation
+        date_df = pivot_daily.astype(int).copy()
+        date_df.columns = [date_key_by_dt.get(c, str(c)) for c in pivot_daily.columns]
+        date_df.index.name = "company"
+        date_df = date_df.reset_index()
+        by_company = by_company.merge(date_df, on="company", how="left")
+        log_timing(
+            "table2_summary.compute_daily_pivot",
+            time.perf_counter() - t_daily,
+            companies=len(companies),
+            n_date_cols=len(date_cols),
+        )
     base_cols = ["公司", "實收金額", "除佣實收", "委刊總檔數", "使用總秒數"]
     out = by_company[["company", "實收金額", "除佣實收", "委刊總檔數", "使用總秒數"]].copy()
     out.columns = base_cols
@@ -176,10 +193,17 @@ def build_table2_summary_by_company(df_segments, df_daily, df_orders, get_media_
     for c in date_cols:
         subtotal[c] = out[c].sum() if c in out.columns else 0
     out = pd.concat([out, pd.DataFrame([subtotal])], ignore_index=True)
+    log_timing(
+        "table2_summary.total",
+        time.perf_counter() - t_total,
+        companies_count=len(companies),
+        media_platform=media_platform or "",
+    )
     return out
 
 
 def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_to_include=None):
+    t_total = time.perf_counter()
     if df_segments.empty:
         return {}
     try:
@@ -194,6 +218,7 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_
     result = {}
     daily_pivot = pd.DataFrame()
     if not df_daily.empty and "segment_id" in df_daily.columns and "日期" in df_daily.columns:
+        t_daily = time.perf_counter()
         if companies_to_include:
             seg = seg[seg["company"].isin(companies_to_include)].copy()
             seg_ids = seg["segment_id"].dropna().unique().tolist()
@@ -203,6 +228,13 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_
         weekday_map = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
         _piv.columns = [f"{c.month}/{c.day}({weekday_map.get(c.weekday(), '')})" if hasattr(c, "month") else str(c) for c in _piv.columns]
         daily_pivot = _piv
+        log_timing(
+            "table2_details.compute_daily_pivot",
+            time.perf_counter() - t_daily,
+            n_segments=len(seg),
+            n_daily_cols=len(daily_pivot.columns),
+            companies_to_include=len(companies_to_include) if companies_to_include else 0,
+        )
     if companies_to_include:
         seg_companies = [c for c in companies_to_include if c in seg["company"].dropna().unique().tolist()]
     else:
@@ -213,7 +245,7 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_
             continue
         s = seg[seg["company"] == company].copy()
         s = s.rename(columns={"client": "客戶名稱", "total_spots": "委刊總檔數", "total_store_seconds": "使用總秒數"})
-        detail = pd.DataFrame(
+        detail_base = pd.DataFrame(
             {
                 "公司": s["company"].values,
                 "平台": s["平台顯示"].values,
@@ -228,15 +260,15 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_
                 "使用總秒數": s["使用總秒數"].fillna(0).astype(int).values,
             }
         )
-        if not daily_pivot.empty and "segment_id" in s.columns:
-            for col in daily_pivot.columns:
-                detail[col] = 0
-            for i, seg_id in enumerate(s["segment_id"].values):
-                if seg_id in daily_pivot.index:
-                    row_vals = daily_pivot.loc[seg_id]
-                    for col in daily_pivot.columns:
-                        if col in detail.columns:
-                            detail.iloc[i, detail.columns.get_loc(col)] = int(row_vals.get(col, 0))
+
+        # 一次性把每日欄位對齊塞進去，避免逐欄 detail[col]=0/迴圈填值造成 fragmentation
+        if not daily_pivot.empty and "segment_id" in s.columns and not daily_pivot.columns.empty:
+            seg_index = pd.Index(s["segment_id"].values, name="segment_id")
+            aligned = daily_pivot.reindex(seg_index).fillna(0).astype(int).reset_index(drop=True)
+            detail = pd.concat([detail_base, aligned], axis=1)
+        else:
+            detail = detail_base
+
         sub = {
             "公司": company,
             "平台": "",
@@ -246,15 +278,22 @@ def build_table2_details_by_company(df_segments, df_daily, df_orders, companies_
             "除佣實收": detail["除佣實收"].sum(),
             "提交日": "",
             "客戶名稱": "",
-            "秒數": "",
+            "秒數": 0,
             "委刊總檔數": detail["委刊總檔數"].sum(),
             "使用總秒數": detail["使用總秒數"].sum(),
         }
-        if not daily_pivot.empty:
+        if not daily_pivot.empty and not daily_pivot.columns.empty:
             for col in daily_pivot.columns:
-                sub[col] = detail[col].sum() if col in detail.columns else 0
+                sub[col] = int(detail[col].sum()) if col in detail.columns else 0
         detail = pd.concat([detail, pd.DataFrame([sub])], ignore_index=True)
         result[company] = detail
+
+    log_timing(
+        "table2_details.total",
+        time.perf_counter() - t_total,
+        companies_to_include=len(companies_to_include) if companies_to_include else 0,
+        companies_result=len(result),
+    )
     return result
 
 
@@ -609,8 +648,10 @@ def build_table3_monthly_control(
         pct_unused = round((total_cap - total_used) / (total_cap or 1) * 100, 1)
         row_used = {"授權": "總經理", "項目": "執行秒", "秒數": int(total_used), "%": f"{pct_used:.1f}"}
         row_cap = {"授權": "總經理", "項目": "可用秒數", "秒數": int(total_cap), "%": f"{pct_unused:.1f}"}
-        row_util = {"授權": "總經理", "項目": "使用率", "秒數": "", "%": "100.0"}
-        row_color = {"授權": "業務", "項目": "可排日", "秒數": "", "%": ""}
+        # 秒數欄位在不同列混用 '' 與 int 會讓 st.dataframe 走到 pyarrow 型別推斷失敗（ArrowInvalid）。
+        # 這裡統一用 0 來保持欄位型別一致。
+        row_util = {"授權": "總經理", "項目": "使用率", "秒數": 0, "%": "100.0"}
+        row_color = {"授權": "業務", "項目": "可排日", "秒數": 0, "%": ""}
         for i in range(len(all_dates)):
             row_used[date_cols[i]] = int(used_by_date.iloc[i]) if i < len(used_by_date) else 0
             row_cap[date_cols[i]] = int(cap_series.iloc[i]) if i < len(cap_series) else 0

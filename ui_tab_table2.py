@@ -9,6 +9,9 @@ from typing import Callable
 
 import pandas as pd
 import streamlit as st
+import time
+
+from services_utils import log_timing
 
 
 def render_table2_tab(
@@ -46,8 +49,10 @@ def render_table2_tab(
         summary_t2_qi = st.session_state.get("_table2_summary_qi", pd.DataFrame())
     else:
         with st.spinner("彙總表2（依公司）中..."):
+            t0 = time.perf_counter()
             summary_t2_fresh = build_table2_summary_by_company(df_seg_t2, df_daily_t2, df_orders, media_platform="全家新鮮視")
             summary_t2_qi = build_table2_summary_by_company(df_seg_t2, df_daily_t2, df_orders, media_platform="全家廣播(企頻)")
+            log_timing("ui_table2.compute_summaries_total", time.perf_counter() - t0, db_mtime=db_mtime)
         st.session_state["_table2_summary_fresh"] = summary_t2_fresh
         st.session_state["_table2_summary_qi"] = summary_t2_qi
         st.session_state["_table2_cache_key"] = db_mtime
@@ -84,11 +89,18 @@ def render_table2_tab(
         details_cache_key = f"_table2_details_{db_mtime}_{str(selected_company)}"
         if details_cache_key not in st.session_state:
             with st.spinner(f"計算 {selected_company} 明細中..."):
+                t0 = time.perf_counter()
                 details_dict = build_table2_details_by_company(
                     df_seg_t2,
                     df_daily_t2,
                     df_orders,
                     companies_to_include=[selected_company],
+                )
+                log_timing(
+                    "ui_table2.compute_details_selected_company",
+                    time.perf_counter() - t0,
+                    db_mtime=db_mtime,
+                    selected_company=str(selected_company),
                 )
                 st.session_state[details_cache_key] = details_dict.get(selected_company, pd.DataFrame())
         details_t2_selected_df = st.session_state.get(details_cache_key, pd.DataFrame())

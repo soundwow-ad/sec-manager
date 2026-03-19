@@ -10,6 +10,9 @@ from typing import Callable, Sequence
 import numpy as np
 import pandas as pd
 import streamlit as st
+import time
+
+from services_utils import log_timing
 
 from ui_order_crud import render_order_crud_panel
 
@@ -67,12 +70,22 @@ def render_table1_tab(
     if st.session_state.get("_table1_cache_key") == cache_key and "_table1_cache" in st.session_state:
         df_table1 = st.session_state["_table1_cache"]
     else:
+        t0 = time.perf_counter()
         df_table1 = build_excel_table1_view(
             df_orders,
             custom_settings,
             use_segments=use_segments,
             df_segments=df_seg_main,
             include_daily_columns=include_daily_columns,
+        )
+        log_timing(
+            "ui_table1.build_excel_table1_view",
+            time.perf_counter() - t0,
+            db_mtime=db_mtime,
+            use_segments=use_segments,
+            view_mode=view_mode,
+            rows=len(df_table1) if isinstance(df_table1, pd.DataFrame) else 0,
+            cols=len(df_table1.columns) if isinstance(df_table1, pd.DataFrame) else 0,
         )
         st.session_state["_table1_cache"] = df_table1
         st.session_state["_table1_cache_key"] = cache_key

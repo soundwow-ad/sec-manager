@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import time
+
 import streamlit as st
+
+from services_utils import log_timing
 
 
 def run_app_shell(
@@ -128,6 +132,7 @@ def run_app_shell(
         save_platform_settings=save_platform_settings,
     )
 
+    t0 = time.perf_counter()
     runtime = load_runtime_data(
         db_file=db_file,
         load_platform_settings=load_platform_settings,
@@ -136,6 +141,7 @@ def run_app_shell(
         explode_segments_to_daily_cached=explode_segments_to_daily_cached,
         build_ad_flight_segments=build_ad_flight_segments,
     )
+    log_timing("app_shell.load_runtime_data_total", time.perf_counter() - t0, db_file=db_file)
     db_mtime = runtime["db_mtime"]
     custom_settings = runtime["custom_settings"]
     df_orders = runtime["df_orders"]
