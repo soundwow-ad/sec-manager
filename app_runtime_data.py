@@ -31,7 +31,6 @@ def load_runtime_data(
         "🧪 實驗分頁",
     }
     tabs_need_segments = {
-        "📋 表1-資料",
         "📅 表2-秒數明細",
         "📉 總結表圖表",
         "📊 分公司×媒體 每月秒數",

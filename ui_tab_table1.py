@@ -39,12 +39,26 @@ def render_table1_tab(
     st.markdown("### 📋 表1－資料（訂單主表）")
     st.caption("此表對應 Excel：秒數管理表 → 表1-資料，為行政與業務對帳用之訂單主表。")
 
-    if st.session_state.get("_table1_cache_key") == db_mtime and "_table1_cache" in st.session_state:
+    # 表1大表若依賴 segments 會牽涉到大量資料與運算；訂單逐筆管理其實可不依賴 segments。
+    # 預設採「不使用 segments」以確保啟動/切換分頁速度；需要更完整細節再手動切換。
+    use_segments = st.checkbox(
+        "使用檔次段（Segments，較慢）",
+        value=False,
+        key="table1_use_segments",
+    )
+    cache_key = (db_mtime, use_segments)
+
+    if st.session_state.get("_table1_cache_key") == cache_key and "_table1_cache" in st.session_state:
         df_table1 = st.session_state["_table1_cache"]
     else:
-        df_table1 = build_excel_table1_view(df_orders, custom_settings, use_segments=True, df_segments=df_seg_main)
+        df_table1 = build_excel_table1_view(
+            df_orders,
+            custom_settings,
+            use_segments=use_segments,
+            df_segments=df_seg_main,
+        )
         st.session_state["_table1_cache"] = df_table1
-        st.session_state["_table1_cache_key"] = db_mtime
+        st.session_state["_table1_cache_key"] = cache_key
 
     if df_table1.empty:
         st.warning("📭 尚無訂單資料")
