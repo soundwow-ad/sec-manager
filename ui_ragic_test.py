@@ -273,16 +273,7 @@ def _entry_to_table1_ragic_overrides(entry: dict, ragic_fields: dict[str, str]) 
             except (TypeError, ValueError):
                 overrides["除佣實收"] = net
 
-    # 拆分金額 ← 收入_除價買收總計(未稅) 或 除价買收相關（若有獨立欄位再填）
-    fid_split = ragic_fields.get("收入_除價買收總計(未稅)")
-    sp = _extract_ragic_value(entry, fid_split or "", RAGIC_NET_KEYS)
-    if sp is None or sp == "":
-        sp = _extract_ragic_from_any_subtable(entry, fid_split or "", ["除价買收(未稅)", "除價買收總計(未稅)"])
-    if sp is not None and sp != "":
-        try:
-            overrides["拆分金額"] = int(float(sp))
-        except (TypeError, ValueError):
-            overrides["拆分金額"] = sp
+    # 拆分金額不從 Ragic 帶入，一律由 _apply_split_amount_by_spots 依「委刊總檔數」比例計算
 
     # 製作成本 ← 主表「製作成本」或子表 收入_製作成本 / 收入_成本 / 成本
     cost = _get_ragic_value_by_keys(entry, "製作成本", "成本")
