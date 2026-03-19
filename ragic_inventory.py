@@ -353,12 +353,16 @@ def init_db():
     conn.close()
 
 
-def _sync_sheets_if_enabled():
+def _sync_sheets_if_enabled(only_tables=None, skip_if_unchanged=True):
     """若已設定 Google Sheet 後端，將目前 DB 同步至試算表。回傳錯誤列表（空表示成功）。"""
     try:
         from sheets_backend import is_sheets_enabled, sync_db_to_sheets
         if is_sheets_enabled():
-            return sync_db_to_sheets(get_db_connection)
+            return sync_db_to_sheets(
+                get_db_connection,
+                only_tables=only_tables,
+                skip_if_unchanged=skip_if_unchanged,
+            )
     except Exception:
         pass
     return []
@@ -2320,7 +2324,7 @@ def import_ragic_to_orders_by_date_range(
         conn_read = get_db_connection()
         df_orders = pd.read_sql("SELECT * FROM orders", conn_read)
         conn_read.close()
-        build_ad_flight_segments(df_orders, load_platform_settings(), write_to_db=True)
+        build_ad_flight_segments(df_orders, load_platform_settings(), write_to_db=True, sync_sheets=False)
         contracts_with_project = df_orders.loc[
             df_orders["project_amount_net"].notna()
             & (pd.to_numeric(df_orders["project_amount_net"], errors="coerce") > 0),
@@ -2329,7 +2333,7 @@ def import_ragic_to_orders_by_date_range(
         for cid in contracts_with_project:
             if cid:
                 _compute_and_save_split_amount_for_contract(str(cid))
-        _sync_sheets_if_enabled()
+        _sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
         _log_ragic_import(
             batch_id,
             "success",
@@ -2527,13 +2531,13 @@ def import_google_sheet_to_orders(url_or_id, replace_existing=True):
         df_orders = pd.read_sql("SELECT * FROM orders", conn_read)
         conn_read.close()
         custom_settings = load_platform_settings()
-        build_ad_flight_segments(df_orders, custom_settings, write_to_db=True)
+        build_ad_flight_segments(df_orders, custom_settings, write_to_db=True, sync_sheets=False)
         # 有填專案實收金額的合約：依使用秒數比例計算並寫回拆分金額
         contracts_with_project = df_orders.loc[df_orders['project_amount_net'].notna() & (pd.to_numeric(df_orders['project_amount_net'], errors='coerce') > 0), 'contract_id'].dropna().unique()
         for cid in contracts_with_project:
             if cid:
                 _compute_and_save_split_amount_for_contract(str(cid))
-        _sync_sheets_if_enabled()
+        _sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
         return True, f"已匯入 {len(orders)} 筆（表1結構）；若有專案實收金額已自動計算拆分金額）"
     except Exception as e:
         conn.rollback()
@@ -2619,7 +2623,7 @@ def calculate_inventory(df_orders=None, custom_settings=None, use_segments=True)
                 
         return pd.DataFrame(daily_records)
 
-def build_ad_flight_segments(df_orders, custom_settings=None, write_to_db=True):
+def build_ad_flight_segments(df_orders, custom_settings=None, write_to_db=True, sync_sheets=True):
     """
     建立檔次段（Flight Segments）核心事實表
     
@@ -2635,6 +2639,7 @@ def build_ad_flight_segments(df_orders, custom_settings=None, write_to_db=True):
         df_orders: 訂單 DataFrame
         custom_settings: 自訂平台設定
         write_to_db: 是否寫入資料庫（預設 True）
+        sync_sheets: 寫入後是否同步 Google Sheet（大量匯入時可關閉，最後再一次同步）
     
     返回:
         DataFrame: 檔次段資料
@@ -2735,7 +2740,8 @@ def build_ad_flight_segments(df_orders, custom_settings=None, write_to_db=True):
             ])
             conn.commit()
             conn.close()
-            _sync_sheets_if_enabled()
+            if sync_sheets:
+                _sync_sheets_if_enabled(only_tables=["Segments"], skip_if_unchanged=True)
         except Exception as e:
             conn.rollback()
             conn.close()

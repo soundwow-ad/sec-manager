@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import hashlib
 from typing import Any
 
 import pandas as pd
@@ -31,6 +32,7 @@ SCOPES = [
 
 # 供同步失敗時顯示 _client() 無法連線的具體原因
 _last_client_error: str | None = None
+_last_table_signatures: dict[str, str] = {}
 
 
 def get_last_client_error() -> str | None:
@@ -239,6 +241,25 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _table_signature(df: pd.DataFrame) -> str:
+    """
+    建立 DataFrame 簽章，用於判斷資料是否變更。
+    目標是避免每次都把整張工作表重寫，降低同步延遲。
+    """
+    try:
+        if df is None or df.empty:
+            return "empty"
+        # 轉成穩定字串後做 hash（4000 列等級開銷遠低於網路全量同步）
+        payload = df.fillna("").astype(str).to_csv(index=False).encode("utf-8")
+        return hashlib.md5(payload).hexdigest()
+    except Exception:
+        # fallback：至少保留形狀資訊
+        try:
+            return f"shape:{df.shape[0]}x{df.shape[1]}"
+        except Exception:
+            return "unknown"
+
+
 def load_orders_from_sheets() -> pd.DataFrame:
     try:
         sh = _client()
@@ -402,7 +423,11 @@ def write_users_to_sheets(df: pd.DataFrame) -> str | None:
         return str(e)
 
 
-def sync_db_to_sheets(get_db_connection) -> list[str]:
+def sync_db_to_sheets(
+    get_db_connection,
+    only_tables: list[str] | None = None,
+    skip_if_unchanged: bool = True,
+) -> list[str]:
     """
     將目前 SQLite 內所有表同步到 Google Sheet。
     使用 get_db_connection() 取得連線並讀取各表。
@@ -411,19 +436,31 @@ def sync_db_to_sheets(get_db_connection) -> list[str]:
     errors = []
     conn = get_db_connection()
     try:
-        for name, loader, writer in [
+        table_jobs = [
             (WS_ORDERS, lambda: pd.read_sql("SELECT * FROM orders", conn), write_orders_to_sheets),
             (WS_SEGMENTS, lambda: pd.read_sql("SELECT * FROM ad_flight_segments", conn), write_segments_to_sheets),
             (WS_PLATFORM_SETTINGS, lambda: pd.read_sql("SELECT * FROM platform_settings", conn), write_platform_settings_to_sheets),
             (WS_CAPACITY, lambda: pd.read_sql("SELECT * FROM platform_monthly_capacity", conn), write_capacity_to_sheets),
             (WS_PURCHASE, lambda: pd.read_sql("SELECT * FROM platform_monthly_purchase", conn), write_purchase_to_sheets),
             (WS_USERS, lambda: pd.read_sql("SELECT id, username, password_hash, role, created_at FROM users", conn), write_users_to_sheets),
-        ]:
+        ]
+        allow = set(only_tables) if only_tables else None
+        for name, loader, writer in table_jobs:
+            if allow is not None and name not in allow:
+                continue
             try:
                 df = loader()
+                if skip_if_unchanged:
+                    sig = _table_signature(df)
+                    old = _last_table_signatures.get(name)
+                    if old == sig:
+                        continue
                 err = writer(df)
                 if err:
                     errors.append(f"{name}: {err}")
+                else:
+                    if skip_if_unchanged:
+                        _last_table_signatures[name] = _table_signature(df)
             except Exception as e:
                 errors.append(f"{name}: {e}")
     finally:
