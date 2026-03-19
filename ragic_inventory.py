@@ -5983,11 +5983,10 @@ elif selected_tab == "🧪 Ragic抓取測試":
         _ragic_fields_merged.update(RAGIC_SUBTABLE_FIELDS)
     except NameError:
         pass
+    # 僅傳 2 個參數，相容 Cloud 上可能尚未更新的 ui_ragic_test；表1 與平台設定在 UI 內以 kwargs 取得時為 None 會自動降級
     render_ragic_test_tab(
         ragic_fields=_ragic_fields_merged,
         parse_cue_excel_for_table1=parse_cue_excel_for_table1,
-        build_table1_from_cue_excel=build_table1_from_cue_excel,
-        load_platform_settings=load_platform_settings,
     )
 
 elif selected_tab == "🧪 實驗分頁":
