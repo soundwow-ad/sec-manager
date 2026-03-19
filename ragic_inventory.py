@@ -5978,7 +5978,12 @@ elif selected_tab == "📋 媒體秒數與採購":
 elif selected_tab == "🧪 Ragic抓取測試":
     from ui_ragic_test import render_ragic_test_tab
 
-    render_ragic_test_tab(ragic_fields=RAGIC_FIELDS, parse_cue_excel_for_table1=parse_cue_excel_for_table1)
+    render_ragic_test_tab(
+        ragic_fields={**RAGIC_FIELDS, **RAGIC_SUBTABLE_FIELDS},
+        parse_cue_excel_for_table1=parse_cue_excel_for_table1,
+        build_table1_from_cue_excel=build_table1_from_cue_excel,
+        load_platform_settings=load_platform_settings,
+    )
 
 elif selected_tab == "🧪 實驗分頁":
     # 鎖定分頁：切換「分析對象」等控件會觸發 rerun，避免跳到其他分頁

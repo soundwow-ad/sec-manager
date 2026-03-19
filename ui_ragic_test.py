@@ -1,14 +1,18 @@
+# -*- coding: utf-8 -*-
+"""
+Ragic 抓取資料測試：搜尋單一案子 → 完整 Ragic 欄位展示 + CUE 解析成表1 + Excel/PDF 下載
+"""
 from __future__ import annotations
 
+import io
+import json
 from datetime import datetime
 from typing import Any, Callable
 
-import json
 import pandas as pd
 import streamlit as st
 
 from ragic_client import (
-    RagicSheetRef,
     download_file,
     extract_entries,
     get_json,
@@ -19,590 +23,380 @@ from ragic_client import (
 )
 
 
+def _normalize_cell(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    if isinstance(v, (list, tuple)):
+        return ", ".join([_normalize_cell(x) for x in v if _normalize_cell(x)])
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)[:200]
+    return str(v).strip()
+
+
+def _flatten_entry(entry: dict, rev_id_to_name: dict[str, str]) -> list[dict]:
+    """將一筆 Ragic entry 攤平成「欄位ID / 欄位名稱 / 值」列表（含巢狀）。"""
+    rows = []
+
+    def walk(obj, prefix=""):
+        if obj is None:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                label = rev_id_to_name.get(str(k), k) if rev_id_to_name else k
+                if v is not None and not isinstance(v, (dict, list)):
+                    rows.append({"欄位ID": k, "欄位名稱": label, "值": _normalize_cell(v)})
+                elif isinstance(v, (dict, list)):
+                    if isinstance(v, dict) and v:
+                        walk(v, prefix=f"{prefix}{k}.")
+                    elif isinstance(v, list):
+                        for i, item in enumerate(v):
+                            if isinstance(item, dict):
+                                walk(item, prefix=f"{prefix}{k}[{i}].")
+                            else:
+                                rows.append({"欄位ID": f"{k}[{i}]", "欄位名稱": f"{label}[{i}]", "值": _normalize_cell(item)})
+            return
+        if isinstance(obj, list):
+            for i, item in enumerate(obj):
+                walk(item, prefix=f"{prefix}[{i}].")
+
+    walk(entry)
+    return rows
+
+
+def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
+    """從 Ragic entry 抽出 parse_cue_excel_for_table1 用的 order_info。"""
+    def g(name: str) -> str:
+        fid = ragic_fields.get(name)
+        if fid and fid in entry and entry.get(fid) not in (None, ""):
+            return _normalize_cell(entry.get(fid))
+        return _normalize_cell(entry.get(name, ""))
+
+    return {
+        "client": g("客戶"),
+        "product": g("產品名稱"),
+        "sales": g("業務(開發客戶)"),
+        "company": g("公司"),
+        "order_id": g("訂檔單號"),
+        "amount_net": 0,
+    }
+
+
+def _deep_collect_excel_tokens(val: Any) -> list[str]:
+    out: list[str] = []
+    if val is None:
+        return out
+    if isinstance(val, str):
+        s = val.strip()
+        if "@" in s and s.lower().endswith((".xlsx", ".xls")):
+            out.append(s)
+        return out
+    if isinstance(val, (list, tuple)):
+        for x in val:
+            out.extend(_deep_collect_excel_tokens(x))
+        return out
+    if isinstance(val, dict):
+        for x in val.values():
+            out.extend(_deep_collect_excel_tokens(x))
+        return out
+    return out
+
+
+def _create_pdf_bytes(ragic_rows: list[dict], table1_df: pd.DataFrame, title: str) -> bytes:
+    """用 reportlab 產生 PDF（Ragic 欄位表 + 表1）。"""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=1.5*cm, leftMargin=1.5*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph(title, styles["Title"]))
+    story.append(Spacer(1, 12))
+
+    # Ragic 完整欄位
+    story.append(Paragraph("一、Ragic 完整欄位", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    if ragic_rows:
+        df_ragic = pd.DataFrame(ragic_rows)
+        data_ragic = [df_ragic.columns.tolist()] + df_ragic.values.tolist()
+        t_ragic = Table(data_ragic, colWidths=[3*cm, 4*cm, 8*cm])
+        t_ragic.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(t_ragic)
+    else:
+        story.append(Paragraph("（無欄位資料）", styles["Normal"]))
+    story.append(Spacer(1, 16))
+
+    # 表1 解析明細
+    story.append(Paragraph("二、表1 解析明細（CUE Excel → 表1 最詳細列表）", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    if not table1_df.empty:
+        # 表1 欄位多，橫向縮小字體與欄寬
+        data_t1 = [table1_df.columns.tolist()] + table1_df.head(100).fillna("").astype(str).values.tolist()
+        ncol = len(table1_df.columns)
+        colw = [2*cm] * min(8, ncol) + [1.2*cm] * max(0, ncol - 8)
+        t_t1 = Table(data_t1, colWidths=colw[:ncol])
+        t_t1.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(t_t1)
+        if len(table1_df) > 100:
+            story.append(Paragraph(f"（僅顯示前 100 列，共 {len(table1_df)} 列；完整請下載 Excel）", styles["Normal"]))
+    else:
+        story.append(Paragraph("（無 CUE Excel 或解析無結果）", styles["Normal"]))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
 def render_ragic_test_tab(
     *,
     ragic_fields: dict[str, str],
     parse_cue_excel_for_table1: Callable[[bytes, Any], list[dict]],
+    build_table1_from_cue_excel: Callable[..., pd.DataFrame] | None = None,
+    load_platform_settings: Callable[[], dict] | None = None,
 ) -> None:
-    st.markdown("### 🧪 Ragic 抓取資料測試（導入前驗證用）")
-    st.caption("可選擇抓取筆數/offset/日期區間，並顯示每筆專案欄位與 CUE Excel 解析結果（含波段拆分）。")
+    st.markdown("### 🧪 Ragic 抓取資料測試")
+    st.caption("搜尋單一案子（訂檔單號或 Ragic ID），檢視完整 Ragic 欄位、CUE 解析成表1、並下載 Excel / PDF。")
 
-    # --- Debug log（可複製）---
-    if "_ragic_debug_log" not in st.session_state:
-        st.session_state["_ragic_debug_log"] = []
-    if "_ragic_last_listing_excel" not in st.session_state:
-        st.session_state["_ragic_last_listing_excel"] = []
-    if "_ragic_last_listing_meta" not in st.session_state:
-        st.session_state["_ragic_last_listing_meta"] = {}
-
-    def _log(msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        st.session_state["_ragic_debug_log"].append(f"[{ts}] {msg}")
-        if len(st.session_state["_ragic_debug_log"]) > 500:
-            st.session_state["_ragic_debug_log"] = st.session_state["_ragic_debug_log"][-500:]
-
-    if not st.session_state["_ragic_debug_log"]:
-        _log("頁面載入：尚未開始抓取（按「🚀 抓取並顯示」後會產生詳細 log）")
-
-    default_ragic_url = "https://ap13.ragic.com/soundwow/forms12/17"
-    ragic_url = st.text_input(
-        "訂檔表單（Listing/Sheet）網址",
-        value=default_ragic_url,
-        help="格式類似：https://ap13.ragic.com/soundwow/forms12/17",
-    )
-    api_key_default = ""
+    default_url = "https://ap13.ragic.com/soundwow/forms12/17"
+    ragic_url = st.text_input("訂檔表單網址", value=default_url, help="Ragic 表單 URL")
+    api_key = ""
     try:
-        api_key_default = st.secrets.get("RAGIC_API_KEY", "")
+        api_key = (st.secrets.get("RAGIC_API_KEY") or "").strip()
     except Exception:
-        api_key_default = ""
-    api_key = st.text_input(
-        "Ragic API Key",
-        value=api_key_default,
-        type="password",
-        help="不會顯示內容；建議放在 .streamlit/secrets.toml 的 RAGIC_API_KEY",
+        pass
+    api_key_input = st.text_input("Ragic API Key", value=api_key, type="password", help="可放在 .streamlit/secrets.toml 的 RAGIC_API_KEY")
+
+    # 搜尋介面
+    search_query = st.text_input(
+        "🔍 搜尋案子",
+        placeholder="輸入訂檔單號 或 Ragic 記錄 ID（數字）",
+        key="ragic_search_query",
     )
+    use_fts = st.checkbox("以關鍵字搜尋列表（訂檔單號／客戶／產品／平台）", value=False, help="若未勾選且輸入為數字，則直接以 Ragic ID 取得單筆")
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        limit = st.number_input("抓取筆數 limit", min_value=1, max_value=2000, value=50, step=10)
-    with c2:
-        offset = st.number_input("起始 offset", min_value=0, max_value=200000, value=0, step=50)
-    with c3:
-        subtables0 = st.checkbox("不抓子表（subtables=0）", value=True)
+    ref = parse_sheet_url(ragic_url)
+    rev_id_to_name = {v: k for k, v in ragic_fields.items()} if ragic_fields else {}
 
-    filter_field = st.selectbox(
-        "日期篩選欄位（抓回後在本機篩）",
-        options=["不篩", "建立日期", "執行開始日期", "執行結束日期"],
-        index=0,
-    )
-    fcol1, fcol2 = st.columns(2)
-    with fcol1:
-        date_from = st.date_input("日期起", value=None)
-    with fcol2:
-        date_to = st.date_input("日期迄", value=None)
+    entry = None
+    if st.button("搜尋", type="primary", key="ragic_search_btn") and (search_query or "").strip():
+        key = (search_query or "").strip()
+        api_key_use = api_key_input or api_key
+        if not api_key_use:
+            st.error("請輸入 Ragic API Key。")
+            st.stop()
 
-    keyword = st.text_input("關鍵字（訂檔單號/客戶/產品/平台 任一包含）", value="")
-
-    st.caption("Debug Log 會在本頁最下方顯示（包含每個 Excel 的下載/工作表/每日檔次抽樣）。")
-
-    def _deep_collect_excel_tokens(val: Any) -> list[str]:
-        """地毯式從 entry 中找出任何 .xlsx/.xls 的 ragic token（含巢狀 dict/list/子表）。"""
-        out: list[str] = []
-        if val is None:
-            return out
-        if isinstance(val, str):
-            s = val.strip()
-            if "@" in s and s.lower().endswith((".xlsx", ".xls")):
-                out.append(s)
-            return out
-        if isinstance(val, (list, tuple)):
-            for x in val:
-                out.extend(_deep_collect_excel_tokens(x))
-            return out
-        if isinstance(val, dict):
-            for x in val.values():
-                out.extend(_deep_collect_excel_tokens(x))
-            return out
-        return out
-
-    def _scan_entry_excel(entry: dict) -> list[str]:
-        tokens = _deep_collect_excel_tokens(entry)
-        # 去重但保序
-        seen = set()
-        uniq = []
-        for t in tokens:
-            if t not in seen:
-                seen.add(t)
-                uniq.append(t)
-        return uniq
-
-    def _normalize_cell(v: Any) -> str:
-        """將 Ragic 回傳的欄位值正規化成可顯示字串（list 轉以逗號串接）。"""
-        if v is None:
-            return ""
-        try:
-            if isinstance(v, float) and pd.isna(v):
-                return ""
-        except Exception:
-            pass
-        if isinstance(v, (list, tuple)):
-            return ", ".join([_normalize_cell(x) for x in v if _normalize_cell(x)])
-        if isinstance(v, dict):
-            # 避免整包 dict 直接印在表格上（可於原始回傳區查看）
-            return ""
-        return str(v).strip()
-
-    def g(e: dict, name: str) -> str:
-        """
-        取值策略（對齊實際回傳）：
-        - 優先用流水號欄位 id（如 1015325）
-        - 若 listing 回傳的是中文欄名（如「訂檔單號」），則改用欄名取值
-        """
-        fid = ragic_fields.get(name)
-        if fid and fid in e and e.get(fid) not in (None, ""):
-            return _normalize_cell(e.get(fid))
-        if name in e and e.get(name) not in (None, ""):
-            return _normalize_cell(e.get(name))
-        return ""
-
-    def entry_to_row(e: dict):
-        cue_fid = ragic_fields.get("訂檔CUE表")
-        cue_val = e.get(cue_fid) if cue_fid and cue_fid in e else e.get("訂檔CUE表")
-        cue_tokens = parse_file_tokens(cue_val)
-        return {
-            "_ragicId": e.get("_ragicId"),
-            "訂檔單號": g(e, "訂檔單號"),
-            "建立日期": g(e, "建立日期"),
-            "客戶": g(e, "客戶"),
-            "產品名稱": g(e, "產品名稱"),
-            "平台": g(e, "平台"),
-            "波段": g(e, "波段"),
-            "總波段": g(e, "總波段"),
-            "執行開始日期": g(e, "執行開始日期"),
-            "執行結束日期": g(e, "執行結束日期"),
-            "CUE表秒數": g(e, "CUE表秒數"),
-            "CUE表總檔數": g(e, "CUE表總檔數"),
-            "訂檔CUE表(檔案數)": len(cue_tokens),
-        }
-
-    def to_date(v):
-        try:
-            dt = pd.to_datetime(v, errors="coerce")
-            return None if pd.isna(dt) else dt.date()
-        except Exception:
-            return None
-
-    fetch_btn = st.button("🚀 抓取並顯示", type="primary")
-    if fetch_btn:
-        _log("—" * 48)
-        _log("開始抓取")
-        if not api_key.strip():
-            st.error("請輸入 Ragic API Key（可放 .streamlit/secrets.toml 的 RAGIC_API_KEY）。")
-            _log("API Key 為空，停止")
-            return
-
-        ref = parse_sheet_url(ragic_url)
-        api_url = make_listing_url(ref, limit=int(limit), offset=int(offset), subtables0=subtables0, fts="")
-        _log(f"API URL={api_url}")
-
-        payload, err = get_json(api_url, api_key, timeout=60)
-        if err:
-            st.error(f"抓取失敗：{err}")
-            _log(f"抓取失敗：{err}")
-            return
-
-        st.caption(f"API 回傳 keys 數量：{len(payload) if isinstance(payload, dict) else '非 dict'}")
-        _log(f"payload type={type(payload).__name__}")
-
-        if isinstance(payload, dict):
-            # Ragic 在權限/金鑰不對時，常回傳 {"status":"ERROR"}（HTTP 可能仍是 200）
-            if str(payload.get("status", "")).upper() == "ERROR":
-                st.error("Ragic 回傳 `status=ERROR`（多半是 API Key/權限不足，或 URL 指到無權限的表單）。")
-                try:
-                    st.json(payload)
-                except Exception:
-                    pass
-                _log(f"Ragic payload status=ERROR payload_keys={list(payload.keys())[:20]}")
-                return
-            try:
-                k0 = next(iter(payload.keys()), None)
-                st.markdown("#### 🔎 API 原始回傳（前 1 筆）")
-                if k0 is not None:
-                    st.json({str(k0): payload.get(k0)})
-            except Exception:
-                pass
-
-        entries = extract_entries(payload)
-        _log(f"entries count={len(entries)}")
-        if not entries:
-            st.warning("沒有抓到任何資料（可能沒有權限或資料為空）。")
-            _log("entries 為空，停止")
-            return
-
-        try:
-            e0 = entries[0]
-            _log("第一筆 entry keys(head 20)=" + ",".join(list(e0.keys())[:20]))
-            _log(f"第一筆 _ragicId={e0.get('_ragicId')}")
-        except Exception as e:
-            _log(f"第一筆 entry 診斷失敗：{e}")
-
-        rows = [entry_to_row(e) for e in entries]
-        df = pd.DataFrame(rows)
-        _log(f"df rows={len(df)} cols={list(df.columns)}")
-        if "_ragicId" in df.columns:
-            _log(f"_ragicId notna count={int(df['_ragicId'].notna().sum())}")
-            try:
-                _log(f"_ragicId sample(head 5)={df['_ragicId'].head(5).tolist()}")
-            except Exception:
-                pass
-        # 提供「未篩選」的 id 清單，避免篩選後 df 變空導致無法選單筆
-        try:
-            st.session_state["_ragic_ids_all"] = pd.to_numeric(df["_ragicId"], errors="coerce").dropna().astype(int).tolist() if "_ragicId" in df.columns else []
-        except Exception:
-            st.session_state["_ragic_ids_all"] = []
-
-        st.markdown("#### 🔎 解析後表格（前 5 列）")
-        st.dataframe(df.head(5), use_container_width=True, hide_index=True)
-
-        # 先掃描本次 listing 內是否有任何 Excel token（避免卡在單筆）
-        listing_excel_rows = []
-        for e in entries:
-            toks = _scan_entry_excel(e)
-            if toks:
-                listing_excel_rows.append(
-                    {
-                        "_ragicId": e.get("_ragicId"),
-                        "訂檔單號": e.get("訂檔單號") or e.get(ragic_fields.get("訂檔單號", "")) or "",
-                        "excel_tokens_count": len(toks),
-                        "excel_tokens(head3)": toks[:3],
-                    }
-                )
-        st.session_state["_ragic_last_listing_excel"] = listing_excel_rows
-        st.session_state["_ragic_last_listing_meta"] = {
-            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "limit": int(limit),
-            "offset": int(offset),
-            "entries": len(entries),
-            "entries_with_excel": len(listing_excel_rows),
-        }
-
-        st.markdown("#### ③ Excel 附件掃描（本次抓取的 listing 內）")
-        meta = st.session_state.get("_ragic_last_listing_meta", {})
-        st.caption(
-            f"抓取時間：{meta.get('fetched_at','')}；entries={meta.get('entries',0)}；含 Excel token 的 entries={meta.get('entries_with_excel',0)}"
-        )
-        if listing_excel_rows:
-            st.dataframe(pd.DataFrame(listing_excel_rows), use_container_width=True, hide_index=True)
-            st.markdown("#### ④ 自動解析（本次掃描到的 Excel）")
-            st.caption("會依掃描到的 token 逐一下載並解析；結果與錯誤都會寫入 Debug Log。")
-
-            max_files = st.number_input("本次最多自動解析檔案數", min_value=1, max_value=200, value=min(20, len(listing_excel_rows)), step=5)
-            auto_parse = st.checkbox("自動下載並解析掃描到的 Excel", value=True, help="關閉可只看掃描結果，不下載檔案。")
-            details_mode = st.checkbox("產出『表1等級』明細（每日檔次逐日列出）", value=True, help="會把解析到的每日檔次展開成逐日明細，方便檢視；資料量大時會比較慢。")
-            parsed_rows = []
-            unit_rows = []
-            daily_rows = []
-            if auto_parse:
-                # 展平成檔案清單（保留對應 ragicId/訂檔單號）
-                file_jobs = []
-                for r in listing_excel_rows:
-                    toks = r.get("excel_tokens(head3)") or []
-                    # head3 只顯示前三個，這裡先解析可見 token；若日後需要完整 token，可改為存 full list
-                    for tok in toks:
-                        file_jobs.append({"_ragicId": r.get("_ragicId"), "訂檔單號": r.get("訂檔單號"), "token": tok})
-                file_jobs = file_jobs[: int(max_files)]
-
-                prog = st.progress(0)
-                for idx, job in enumerate(file_jobs):
-                    tok = job["token"]
-                    _log(f"[auto-parse] download token={tok}")
-                    content, derr = download_file(ref, tok, api_key, timeout=180)
-                    if derr or not content:
-                        _log(f"[auto-parse] download failed token={tok} err={derr}")
-                        parsed_rows.append({**job, "status": "download_failed", "error": derr or "empty content", "ad_units": 0})
-                        prog.progress(int((idx + 1) / max(1, len(file_jobs)) * 100))
-                        continue
-                    try:
-                        size_kb = int(len(content) / 1024)
-                        _log(f"[auto-parse] downloaded bytes={len(content)} (~{size_kb}KB) token={tok}")
-                        # 額外：列出工作表名（協助判斷是不是 cueapp 產出的 CUE 表）
-                        try:
-                            import pandas as _pd
-                            import io as _io
-                            xls_ = _pd.ExcelFile(_io.BytesIO(content), engine="openpyxl")
-                            _log(f"[auto-parse] sheets={xls_.sheet_names[:10]}")
-                        except Exception as e:
-                            _log(f"[auto-parse] list sheets failed: {e}")
-
-                        cue_units = parse_cue_excel_for_table1(content, order_info=None)
-                        ad_units = len(cue_units) if cue_units else 0
-                        if ad_units == 0:
-                            # 解析不到時，給出可行的「版型診斷」log，讓使用者知道 Excel 裡到底長什麼樣
-                            try:
-                                import datetime as _dt
-                                import openpyxl as _op
-                                import io as _io
-
-                                wb = _op.load_workbook(_io.BytesIO(content), data_only=True, read_only=True)
-                                for sname in wb.sheetnames[:10]:
-                                    ws = wb[sname]
-                                    date_like = 0
-                                    num_like = 0
-                                    samples = []
-                                    max_r = min(30, ws.max_row or 0)
-                                    max_c = min(18, ws.max_column or 0)
-                                    for r in range(1, max_r + 1):
-                                        row_vals = []
-                                        for c in range(1, max_c + 1):
-                                            v = ws.cell(row=r, column=c).value
-                                            if isinstance(v, (_dt.date, _dt.datetime)):
-                                                date_like += 1
-                                            elif isinstance(v, (int, float)) and v != 0:
-                                                num_like += 1
-                                            row_vals.append(v)
-                                        if r <= 8:
-                                            samples.append(row_vals[:10])
-                                    _log(f"[auto-parse][diag] sheet='{sname}' max_row={ws.max_row} max_col={ws.max_column} date_like={date_like} num_like(nonzero)={num_like}")
-                                    # 左上角抽樣（前 8x10），避免整份倒出太大
-                                    try:
-                                        preview = "\n".join([str(x) for x in samples])
-                                        _log(f"[auto-parse][diag] top_left_8x10 sheet='{sname}' => {preview}")
-                                    except Exception:
-                                        pass
-                                try:
-                                    wb.close()
-                                except Exception:
-                                    pass
-                            except Exception as e:
-                                _log(f"[auto-parse][diag] profile failed: {e}")
-                        # 摘要：起迄日、總檔次（合計）
-                        starts = [u.get("start_date") for u in cue_units if u.get("start_date")]
-                        ends = [u.get("end_date") for u in cue_units if u.get("end_date")]
-                        total_spots_sum = 0
-                        try:
-                            total_spots_sum = int(sum([int(u.get("total_spots") or 0) for u in cue_units]))
-                        except Exception:
-                            total_spots_sum = 0
-
-                        # 表1等級明細：單位層 + 逐日層
-                        if cue_units:
-                            for u in cue_units:
-                                unit_rows.append(
-                                    {
-                                        **job,
-                                        "source_sheet": u.get("source_sheet"),
-                                        "source_row": u.get("source_row"),
-                                        "platform": u.get("platform"),
-                                        "region": u.get("region"),
-                                        "seconds": u.get("seconds"),
-                                        "ad_name": u.get("ad_name"),
-                                        "start_date": u.get("start_date"),
-                                        "end_date": u.get("end_date"),
-                                        "days": u.get("days"),
-                                        "total_spots": u.get("total_spots"),
-                                        "split_reason": u.get("split_reason"),
-                                    }
-                                )
-                                if details_mode:
-                                    dts = u.get("dates") or []
-                                    dss = u.get("daily_spots") or []
-                                    n = min(len(dts), len(dss))
-                                    for i2 in range(n):
-                                        daily_rows.append(
-                                            {
-                                                **job,
-                                                "source_sheet": u.get("source_sheet"),
-                                                "platform": u.get("platform"),
-                                                "region": u.get("region"),
-                                                "seconds": u.get("seconds"),
-                                                "ad_name": u.get("ad_name"),
-                                                "date": dts[i2],
-                                                "daily_spots": dss[i2],
-                                            }
-                                        )
-                        parsed_rows.append({
-                            **job,
-                            "status": "ok",
-                            "ad_units": ad_units,
-                            "start_date_min": min(starts) if starts else "",
-                            "end_date_max": max(ends) if ends else "",
-                            "total_spots_sum": total_spots_sum,
-                            "sample_daily_spots": (cue_units[0].get("daily_spots") or [])[:14] if cue_units else [],
-                            "sample_dates": (cue_units[0].get("dates") or [])[:14] if cue_units else [],
-                            "error": "",
-                        })
-                        _log(f"[auto-parse] ok token={tok} ad_units={ad_units} total_spots_sum={total_spots_sum}")
-                    except Exception as e:
-                        _log(f"[auto-parse] parse failed token={tok} err={e}")
-                        parsed_rows.append({**job, "status": "parse_failed", "error": str(e), "ad_units": 0})
-                    prog.progress(int((idx + 1) / max(1, len(file_jobs)) * 100))
-
-                if parsed_rows:
-                    st.dataframe(pd.DataFrame(parsed_rows), use_container_width=True, hide_index=True)
-                    st.caption("`sample_daily_spots/sample_dates` 為第一個 ad_unit 的前 14 天抽樣，方便快速核對每日檔次。")
-                    if unit_rows:
-                        st.markdown("#### ⑤ 表1-解析明細（單位層，類似表1）")
-                        df_units_all = pd.DataFrame(unit_rows)
-                        st.dataframe(df_units_all, use_container_width=True, hide_index=True)
-                        st.download_button(
-                            "下載 解析明細-單位層.csv",
-                            data=df_units_all.to_csv(index=False).encode("utf-8-sig"),
-                            file_name=f"ragic_parse_units_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv",
-                            key="dl_units_csv",
-                        )
-                    if details_mode and daily_rows:
-                        st.markdown("#### ⑥ 表1-解析明細（逐日層：每日檔次）")
-                        df_daily_all = pd.DataFrame(daily_rows)
-                        st.dataframe(df_daily_all, use_container_width=True, hide_index=True)
-                        st.download_button(
-                            "下載 解析明細-逐日層.csv",
-                            data=df_daily_all.to_csv(index=False).encode("utf-8-sig"),
-                            file_name=f"ragic_parse_daily_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv",
-                            key="dl_daily_csv",
-                        )
-                else:
-                    st.info("沒有可解析的 Excel token（或尚未啟用自動解析）。")
-        else:
-            st.info("本次 listing 50 筆內沒有掃到任何 .xlsx/.xls token（可能 Excel 不在此欄位、或需單筆 API 才看得到）。")
-
-        # 本機日期篩選
-        if filter_field != "不篩" and (date_from or date_to):
-            col = filter_field
-            if col not in df.columns:
-                st.warning(f"抓取結果沒有欄位「{col}」，已略過日期篩選。")
+        # 若為數字且未勾選 fts，先試單筆 API
+        if not use_fts and key.isdigit():
+            single_url = make_single_record_url(ref, int(key))
+            payload, err = get_json(single_url, api_key_use, timeout=60)
+            if err:
+                st.warning(f"單筆取得失敗：{err}，改以列表搜尋。")
+            elif isinstance(payload, dict) and str(payload.get("status", "")).upper() == "ERROR":
+                st.warning("Ragic 回傳錯誤，改以列表搜尋。")
             else:
-                df[col + "_date"] = df[col].apply(to_date)
-                if date_from:
-                    df = df[df[col + "_date"].notna() & (df[col + "_date"] >= date_from)]
-                if date_to:
-                    df = df[df[col + "_date"].notna() & (df[col + "_date"] <= date_to)]
+                if str(key) in payload and isinstance(payload.get(str(key)), dict):
+                    entry = payload[str(key)]
+                    entry["_ragicId"] = int(key)
+                elif isinstance(payload, dict) and not any(str(k).isdigit() for k in payload.keys()):
+                    entry = payload
+                    entry["_ragicId"] = int(key)
+                if entry:
+                    st.session_state["_ragic_last_entry"] = entry
+                    st.success(f"已取得 Ragic ID = {key}")
+                    st.rerun()
 
-        # 關鍵字篩選
-        if keyword.strip():
-            kw = keyword.strip()
-            mask = False
-            for c in ["訂檔單號", "客戶", "產品名稱", "平台"]:
-                if c in df.columns:
-                    mask = mask | df[c].astype(str).fillna("").str.contains(kw, regex=False)
-            df = df[mask]
-
-        st.markdown("#### ① 抓取結果（專案清單）")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        st.markdown("#### ② 檢視單筆專案 + 解析 CUE Excel")
-        ids = st.session_state.get("_ragic_ids_all", [])
-        if not ids:
-            st.info("抓到的資料沒有 _ragicId，無法進一步解析。")
-            _log("無可用 _ragicId")
-        else:
-            sel_id = st.selectbox("選擇 _ragicId", options=ids)
-
-        # listing 有時不含檔案欄位，改抓單筆 entry 取得完整欄位（含附件/子表）
-        single_url = make_single_record_url(ref, sel_id)
-        _log(f"single record url={single_url}")
-        single_payload, single_err = get_json(single_url, api_key, timeout=60)
-        if single_err or not isinstance(single_payload, dict):
-            _log(f"single record 失敗：{single_err}")
-            # fallback：用 listing entry
-            entry = next((e for e in entries if int(e.get("_ragicId", -1)) == int(sel_id)), None)
-        else:
-            # 單筆回傳通常是 {"<rid>": {...}} 或直接 {...}
-            if str(sel_id) in single_payload and isinstance(single_payload.get(str(sel_id)), dict):
-                entry = single_payload.get(str(sel_id))
+        # 列表 + fts 或單筆失敗
+        if entry is None:
+            fts_param = key if use_fts or not key.isdigit() else ""
+            list_url = make_listing_url(ref, limit=50, offset=0, subtables0=False, fts=fts_param)
+            payload, err = get_json(list_url, api_key_use, timeout=60)
+            if err:
+                st.error(f"抓取失敗：{err}")
+                st.stop()
+            if isinstance(payload, dict) and str(payload.get("status", "")).upper() == "ERROR":
+                st.error("Ragic 回傳 status=ERROR（API Key/權限或 URL 可能有誤）。")
+                st.stop()
+            entries = extract_entries(payload)
+            if not entries:
+                st.warning("沒有符合的資料。")
+                st.stop()
+            # 關鍵字篩選（本機）
+            if key and not key.isdigit():
+                kw = key.lower()
+                filtered = [e for e in entries if kw in str(e.get("訂檔單號") or e.get(ragic_fields.get("訂檔單號", "")) or "").lower()
+                    or kw in str(e.get("客戶") or e.get(ragic_fields.get("客戶", "")) or "").lower()
+                    or kw in str(e.get("產品名稱") or e.get(ragic_fields.get("產品名稱", "")) or "").lower()
+                    or kw in str(e.get("平台") or e.get(ragic_fields.get("平台", "")) or "").lower()]
+                if filtered:
+                    entries = filtered
+            if len(entries) == 1:
+                entry = entries[0]
+                st.session_state["_ragic_last_entry"] = entry
+                st.success("找到 1 筆，已載入。")
+                st.rerun()
             else:
-                entry = single_payload
-            if isinstance(entry, dict) and not entry.get("_ragicId"):
-                entry["_ragicId"] = int(sel_id)
+                st.session_state["_ragic_search_results"] = entries
+                st.session_state["_ragic_search_key"] = key
+                st.info(f"找到 {len(entries)} 筆，請選擇一筆檢視。")
+                st.rerun()
 
-        if not entry or not isinstance(entry, dict):
-            st.warning("找不到該筆 entry（單筆/列表皆失敗）。")
-        else:
-            show_fields = [
-                "訂檔單號",
-                "客戶",
-                "產品名稱",
-                "平台",
-                "波段",
-                "總波段",
-                "執行開始日期",
-                "執行結束日期",
-                "CUE表秒數",
-                "CUE表總檔數",
-                "訂檔CUE表",
-            ]
-            info = {}
-            for k in show_fields:
-                fid = ragic_fields.get(k)
-                info[k] = entry.get(fid) if fid and fid in entry else entry.get(k)
-            st.json(info)
-
-            cue_fid = ragic_fields.get("訂檔CUE表")
-            cue_val = entry.get(cue_fid) if cue_fid and cue_fid in entry else entry.get("訂檔CUE表")
-            cue_tokens = parse_file_tokens(cue_val)
-            # 只解析 Excel；若只有 JPG/PDF，先提示
-            excel_tokens = [t for t in cue_tokens if str(t).lower().endswith((".xlsx", ".xls"))]
-            if not excel_tokens:
-                # 單筆也做一次地毯式掃描，避免 Excel 放在其他欄位/子表
-                excel_tokens = _scan_entry_excel(entry)
-            if not cue_tokens:
-                st.info("此筆沒有「訂檔CUE表」檔案。")
-            else:
-                st.markdown(f"**訂檔CUE表檔案數：{len(cue_tokens)}**")
-                for i, tok in enumerate(cue_tokens, start=1):
-                    st.markdown(f"- 檔案{i}：`{tok}`")
-                if not excel_tokens:
-                    st.warning("此筆「訂檔CUE表」沒有 Excel（.xlsx/.xls）。目前抓到的檔案可能是 JPG/PDF（例如報價單），因此不會進行 CUE 解析。")
-
-                parse_now = st.checkbox("立即下載並解析 CUE Excel", value=True)
-                if parse_now and excel_tokens:
-                    for i, tok in enumerate(excel_tokens, start=1):
-                        with st.expander(f"解析 檔案{i}"):
-                            content, derr = download_file(ref, tok, api_key, timeout=120)
-                            if derr:
-                                st.error(f"下載失敗：{derr}")
-                                _log(f"下載失敗 token={tok} err={derr}")
-                                continue
-                            cue_units = parse_cue_excel_for_table1(content, order_info=None)
-                            st.markdown(f"解析出 ad_unit 筆數：**{len(cue_units)}**")
-                            if cue_units:
-                                df_units = pd.DataFrame(
-                                    [
-                                        {
-                                            "platform": u.get("platform"),
-                                            "region": u.get("region"),
-                                            "seconds": u.get("seconds"),
-                                            "start_date": u.get("start_date"),
-                                            "end_date": u.get("end_date"),
-                                            "days": u.get("days"),
-                                            "total_spots": u.get("total_spots"),
-                                            "source_sheet": u.get("source_sheet"),
-                                            "split_reason": u.get("split_reason"),
-                                        }
-                                        for u in cue_units
-                                    ]
-                                )
-                                st.dataframe(df_units, use_container_width=True, hide_index=True)
-
-                                sample = []
-                                for u in cue_units[:10]:
-                                    ds = u.get("daily_spots") or []
-                                    dts = u.get("dates") or []
-                                    sample.append(
-                                        {
-                                            "platform": u.get("platform"),
-                                            "region": u.get("region"),
-                                            "seconds": u.get("seconds"),
-                                            "dates(head)": dts[:7],
-                                            "daily_spots(head)": ds[:7],
-                                        }
-                                    )
-                                st.markdown("**每日檔次（前 7 天抽樣 / 前 10 筆）**")
-                                st.dataframe(pd.DataFrame(sample), use_container_width=True, hide_index=True)
-                            else:
-                                st.warning("此檔案沒有解析出每日檔次（可能不是預期版型或內容全空）。")
-
-    # 額外：將「最後一次掃描到的 Excel token」提供複製（方便回報）
-    st.markdown("#### 📎 最後一次 Excel 掃描結果（可複製）")
-    excel_rows = st.session_state.get("_ragic_last_listing_excel", [])
-    st.text_area("excel_scan_json", value=json.dumps(excel_rows, ensure_ascii=False, indent=2), height=160, key="ragic_excel_scan_area")
-
-    st.markdown("#### 🧾 Debug Log（可直接複製貼回）")
-    log_text = "\n".join(st.session_state.get("_ragic_debug_log", []))
-    st.session_state["ragic_debug_log_area"] = log_text
-    st.text_area("log", value=st.session_state.get("ragic_debug_log_area", ""), height=260, key="ragic_debug_log_area")
-    b1, b2 = st.columns([1, 3])
-    with b1:
-        if st.button("清除 log", key="btn_clear_ragic_log"):
-            st.session_state["_ragic_debug_log"] = []
+    # 若剛搜尋有多筆，顯示選擇
+    if "_ragic_search_results" in st.session_state and st.session_state.get("_ragic_search_results"):
+        results = st.session_state["_ragic_search_results"]
+        options = []
+        for e in results:
+            rid = e.get("_ragicId", "")
+            no = e.get("訂檔單號") or e.get(ragic_fields.get("訂檔單號", "")) or ""
+            client = e.get("客戶") or e.get(ragic_fields.get("客戶", "")) or ""
+            options.append(f"{rid} | {no} | {client}")
+        idx = st.selectbox("選擇一筆案子", range(len(options)), format_func=lambda i: options[i], key="ragic_select_result")
+        if st.button("載入所選", key="ragic_load_selected"):
+            st.session_state["_ragic_last_entry"] = results[idx]
+            del st.session_state["_ragic_search_results"]
             st.rerun()
-    with b2:
-        st.download_button(
-            "下載 log.txt",
-            data=(log_text or "").encode("utf-8"),
-            file_name=f"ragic_debug_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain",
-            key="download_ragic_log",
-        )
 
+    # 顯示已載入的單筆
+    entry = st.session_state.get("_ragic_last_entry")
+    if not entry or not isinstance(entry, dict):
+        st.info("請在上方輸入訂檔單號或 Ragic ID，按「搜尋」取得一筆案子。")
+        return
+
+    api_key_use = api_key_input or api_key
+    if not api_key_use:
+        st.warning("未設定 API Key，無法下載 CUE Excel；僅顯示已抓到的 Ragic 欄位。")
+
+    rid = entry.get("_ragicId", "")
+    st.markdown("---")
+    st.markdown(f"#### 📌 案子：_ragicId = {rid}")
+
+    # 一、Ragic 完整欄位（超詳盡）
+    st.markdown("##### 一、Ragic 完整欄位（所有抓到的欄位）")
+    ragic_rows = _flatten_entry(entry, rev_id_to_name)
+    if ragic_rows:
+        df_ragic = pd.DataFrame(ragic_rows)
+        with st.expander("展開 Ragic 完整欄位表", expanded=True):
+            st.dataframe(df_ragic, use_container_width=True, hide_index=True)
+    else:
+        # 簡易 key-value
+        simple = [{"欄位": k, "值": _normalize_cell(v)} for k, v in entry.items()]
+        st.dataframe(pd.DataFrame(simple), use_container_width=True, hide_index=True)
+
+    # 二、CUE Excel 解析成表1
+    st.markdown("##### 二、CUE Excel 解析為表1（最詳細列表）")
+    cue_fid = ragic_fields.get("訂檔CUE表")
+    cue_val = entry.get(cue_fid) if cue_fid and cue_fid in entry else entry.get("訂檔CUE表")
+    cue_tokens = parse_file_tokens(cue_val)
+    excel_tokens = [t for t in cue_tokens if str(t).lower().endswith((".xlsx", ".xls"))]
+    if not excel_tokens:
+        excel_tokens = _deep_collect_excel_tokens(entry)
+    order_info = _entry_to_order_info(entry, ragic_fields)
+    custom_settings = load_platform_settings() if load_platform_settings else None
+    build_table1 = build_table1_from_cue_excel if build_table1_from_cue_excel else None
+
+    all_table1_dfs: list[pd.DataFrame] = []
+    for i, tok in enumerate(excel_tokens, start=1):
+        with st.expander(f"CUE 檔案 {i}：{tok[:50]}...", expanded=(i == 1)):
+            if not api_key_use:
+                st.caption("請設定 API Key 以下載並解析。")
+                continue
+            content, derr = download_file(ref, tok, api_key_use, timeout=120)
+            if derr or not content:
+                st.error(f"下載失敗：{derr}")
+                continue
+            cue_units = parse_cue_excel_for_table1(content, order_info=order_info)
+            if not cue_units:
+                st.warning("此檔案未解析出每日檔次（可能非 CUE 版型）。")
+                continue
+            st.caption(f"解析出 {len(cue_units)} 個廣告單位。")
+            if build_table1:
+                df_t1 = build_table1(cue_units, custom_settings=custom_settings)
+                if not df_t1.empty:
+                    all_table1_dfs.append(df_t1)
+                    st.dataframe(df_t1, use_container_width=True, hide_index=True)
+            else:
+                df_simple = pd.DataFrame([
+                    {
+                        "platform": u.get("platform"),
+                        "region": u.get("region"),
+                        "seconds": u.get("seconds"),
+                        "start_date": u.get("start_date"),
+                        "end_date": u.get("end_date"),
+                        "days": u.get("days"),
+                        "total_spots": u.get("total_spots"),
+                        "source_sheet": u.get("source_sheet"),
+                    }
+                    for u in cue_units
+                ])
+                st.dataframe(df_simple, use_container_width=True, hide_index=True)
+
+    # 合併表1（多檔時）
+    if len(all_table1_dfs) > 1:
+        st.markdown("##### 表1 合併結果（所有 CUE 檔案）")
+        df_combined = pd.concat(all_table1_dfs, ignore_index=True)
+        st.dataframe(df_combined, use_container_width=True, hide_index=True)
+        all_table1_dfs = [df_combined]
+    elif len(all_table1_dfs) == 1:
+        df_combined = all_table1_dfs[0]
+    else:
+        df_combined = pd.DataFrame()
+
+    # 下載 Excel
+    st.markdown("##### 📥 下載")
+    if not ragic_rows:
+        ragic_rows = [{"欄位ID": k, "欄位名稱": k, "值": _normalize_cell(v)} for k, v in entry.items()]
+    df_ragic_export = pd.DataFrame(ragic_rows)
+
+    excel_buf = io.BytesIO()
+    with pd.ExcelWriter(excel_buf, engine="openpyxl") as w:
+        df_ragic_export.to_excel(w, sheet_name="Ragic完整欄位", index=False)
+        if not df_combined.empty:
+            df_combined.to_excel(w, sheet_name="表1-解析明細", index=False)
+    excel_buf.seek(0)
+    st.download_button(
+        "📥 下載 Excel（Ragic 欄位 + 表1 解析明細）",
+        data=excel_buf.getvalue(),
+        file_name=f"ragic_case_{rid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_ragic_excel",
+    )
+
+    # 下載 PDF
+    try:
+        pdf_bytes = _create_pdf_bytes(ragic_rows, df_combined, f"Ragic 案子 {rid} 詳盡解析")
+        st.download_button(
+            "📥 下載 PDF（Ragic 欄位 + 表1 摘要）",
+            data=pdf_bytes,
+            file_name=f"ragic_case_{rid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            key="dl_ragic_pdf",
+        )
+    except Exception as e:
+        st.caption(f"PDF 產生失敗：{e}（請確認已安裝 reportlab）")
+
+    if st.button("清除目前案子", key="ragic_clear_entry"):
+        if "_ragic_last_entry" in st.session_state:
+            del st.session_state["_ragic_last_entry"]
+        if "_ragic_search_results" in st.session_state:
+            del st.session_state["_ragic_search_results"]
+        st.rerun()
