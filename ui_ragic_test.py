@@ -172,9 +172,11 @@ def render_ragic_test_tab(
     *,
     ragic_fields: dict[str, str],
     parse_cue_excel_for_table1: Callable[[bytes, Any], list[dict]],
-    build_table1_from_cue_excel: Callable[..., pd.DataFrame] | None = None,
-    load_platform_settings: Callable[[], dict] | None = None,
+    **kwargs: Any,
 ) -> None:
+    """kwargs 可含 build_table1_from_cue_excel, load_platform_settings（相容舊版僅傳 2 參數）。"""
+    build_table1_from_cue_excel = kwargs.get("build_table1_from_cue_excel")
+    load_platform_settings = kwargs.get("load_platform_settings")
     st.markdown("### 🧪 Ragic 抓取資料測試")
     st.caption("搜尋單一案子（訂檔單號或 Ragic ID），檢視完整 Ragic 欄位、CUE 解析成表1、並下載 Excel / PDF。")
 

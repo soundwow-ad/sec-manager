@@ -5978,8 +5978,13 @@ elif selected_tab == "📋 媒體秒數與採購":
 elif selected_tab == "🧪 Ragic抓取測試":
     from ui_ragic_test import render_ragic_test_tab
 
+    _ragic_fields_merged = {**RAGIC_FIELDS}
+    try:
+        _ragic_fields_merged.update(RAGIC_SUBTABLE_FIELDS)
+    except NameError:
+        pass
     render_ragic_test_tab(
-        ragic_fields={**RAGIC_FIELDS, **RAGIC_SUBTABLE_FIELDS},
+        ragic_fields=_ragic_fields_merged,
         parse_cue_excel_for_table1=parse_cue_excel_for_table1,
         build_table1_from_cue_excel=build_table1_from_cue_excel,
         load_platform_settings=load_platform_settings,
