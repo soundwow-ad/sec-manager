@@ -159,7 +159,7 @@ def render_order_crud_panel(
                     edit_seconds_type = st.selectbox(
                         "秒數用途",
                         list(seconds_usage_types),
-                        index=_idx(list(seconds_usage_types), selected_row.get("seconds_type") or "銷售秒數"),
+                        index=_idx(list(seconds_usage_types), selected_row.get("seconds_type") or ""),
                         key="crud_edit_seconds_type",
                     )
                 with col_edit_b:

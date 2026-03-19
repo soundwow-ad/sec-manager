@@ -24,7 +24,8 @@ def build_annual_seconds_summary(
     if "媒體平台" not in df.columns:
         return None
     if "秒數用途" not in df.columns:
-        df["秒數用途"] = "銷售秒數"
+        # 若根本沒有該欄位，避免誤把未知資料當成銷售秒數
+        df["秒數用途"] = ""
 
     def to_entity(mp):
         for ent, platforms in annual_summary_media_map.items():

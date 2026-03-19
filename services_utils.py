@@ -101,9 +101,11 @@ SECONDS_TYPE_ALIASES = {
 
 def normalize_seconds_type(val):
     """將秒數用途正規化為 SECONDS_USAGE_TYPES 其一。"""
+    # 嚴謹口徑：無法判斷就維持空字串，不要硬推預設值，避免商業語意錯置。
     if not val or (isinstance(val, float) and pd.isna(val)):
-        return "銷售秒數"
+        return ""
     s = str(val).strip()
     if s in SECONDS_USAGE_TYPES:
         return s
-    return SECONDS_TYPE_ALIASES.get(s, "銷售秒數")
+    # 別名轉換；無法識別則回傳空字串（表示未填/未判斷）
+    return SECONDS_TYPE_ALIASES.get(s, "")

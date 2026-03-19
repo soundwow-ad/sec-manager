@@ -47,7 +47,8 @@ def build_table1_from_cue_excel(
             "加發獎金": "",
             "業務基金": "",
             "協力基金": "",
-            "秒數用途": "銷售秒數",
+            # 若無法判斷 seconds_type，就保持空值（避免錯置成銷售秒數）
+            "秒數用途": "",
             "提交日": "",
             "HYUNDAI_CUSTIN": ad_unit.get("client", ""),
             "秒數": seconds,
@@ -390,7 +391,8 @@ def build_table1_from_segments(
             "加發獎金": "",
             "業務基金": "",
             "協力基金": "",
-            "秒數用途": ("銷售秒數" if (row.get("seconds_type") or "") == "銷售" else (row.get("seconds_type") or "銷售秒數")),
+            # 若無 seconds_type 就保持空值；只有在值為「銷售」別名時才轉成「銷售秒數」
+            "秒數用途": ("銷售秒數" if (row.get("seconds_type") or "") == "銷售" else (row.get("seconds_type") or "")),
             "提交日": df.loc[idx, "提交日"],
             "HYUNDAI_CUSTIN": row.get("client", ""),
             "秒數": int(row.get("seconds", 0) or 0),
@@ -559,7 +561,7 @@ def build_excel_table1_view(
             "加發獎金": "",
             "業務基金": "",
             "協力基金": "",
-            "秒數用途": row.get("seconds_type") or "銷售秒數",
+            "秒數用途": row.get("seconds_type") or "",
             "提交日": df.loc[idx, "提交日"],
             "HYUNDAI_CUSTIN": row.get("client", ""),
             "秒數": int(row.get("seconds", 0) or 0),

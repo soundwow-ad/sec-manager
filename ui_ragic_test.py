@@ -719,7 +719,8 @@ def render_ragic_test_tab(
                         "加發獎金": PLACEHOLDER_MISSING,
                         "業務基金": PLACEHOLDER_MISSING,
                         "協力基金": PLACEHOLDER_MISSING,
-                        "秒數用途": "銷售秒數",
+                        # 無法可靠判斷秒數用途時，維持空值（避免硬推銷售秒數）
+                        "秒數用途": "",
                         "提交日": ragic_overrides.get("提交日") or PLACEHOLDER_MISSING,
                         "HYUNDAI_CUSTIN": order_info.get("client") or PLACEHOLDER_NOT_AVAILABLE,
                         "秒數": sec,

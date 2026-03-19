@@ -96,7 +96,8 @@ def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable
     sales = get("sales") or get("業務")
     company = get("company") or get("公司")
     contract_id = get("contract_id") or get("合約編號")
-    seconds_type = normalize_seconds_type(get("seconds_type") or get("秒數用途") or "銷售秒數")
+    # 嚴謹口徑：若試算表沒有填秒數用途，就保留空值（不要硬推銷售秒數）
+    seconds_type = normalize_seconds_type(get("seconds_type") or get("秒數用途") or "")
     try:
         project_amount_net = float(get("project_amount_net") or get("專案實收金額") or 0)
     except (ValueError, TypeError):
@@ -167,7 +168,7 @@ def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable
         amount_net,
         updated_at,
         contract_id or None,
-        seconds_type or "銷售秒數",
+        seconds_type or "",
         project_amount_net,
     )
 

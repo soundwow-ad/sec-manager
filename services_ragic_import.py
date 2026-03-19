@@ -278,7 +278,7 @@ def import_ragic_to_orders_by_date_range_service(
                         0,
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         str(order_no),
-                        "銷售秒數",
+                    "",  # 目前 ragic 匯入無法可靠判斷秒數用途：保留空值
                         project_amount if project_amount and project_amount > 0 else None,
                         None,
                     )
@@ -558,7 +558,7 @@ def import_ragic_single_entry_to_orders_service(
                 continue
 
             order_rows.append(
-                (
+                    (
                     order_id,
                     platform_raw,
                     order_info["client"],
@@ -572,7 +572,7 @@ def import_ragic_single_entry_to_orders_service(
                     0,
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     str(order_no),
-                    "銷售秒數",
+                        "",  # 目前 ragic 匯入無法可靠判斷秒數用途：保留空值，避免硬推語意
                     project_amount if project_amount and project_amount > 0 else None,
                     None,
                 )
