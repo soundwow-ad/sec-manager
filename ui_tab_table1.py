@@ -150,10 +150,23 @@ def render_table1_tab(
 
     st.markdown("#### 🧩 Segments 秒數用途快速編輯（優先）")
     with st.expander("🔧 顯示／編輯尚未填寫 seconds_type 的 Segments", expanded=False):
-        if df_seg_main is None or df_seg_main.empty:
+        # 編輯區優先直讀 DB，避免 runtime 快取/分頁懶載入導致看不到最新 segments。
+        df_seg_live = pd.DataFrame()
+        try:
+            conn_seg = get_db_connection()
+            df_seg_live = pd.read_sql("SELECT * FROM ad_flight_segments", conn_seg)
+            conn_seg.close()
+        except Exception:
+            try:
+                conn_seg.close()
+            except Exception:
+                pass
+        seg_source_df = df_seg_live if not df_seg_live.empty else df_seg_main
+
+        if seg_source_df is None or seg_source_df.empty:
             st.info("目前 segments 為空，無可編輯資料。")
         else:
-            df_seg_editor = df_seg_main.copy()
+            df_seg_editor = seg_source_df.copy()
             # 可能欄位不齊時的保護
             for col in ["segment_id", "seconds_type", "company", "sales", "client", "platform", "channel", "region"]:
                 if col not in df_seg_editor.columns:
