@@ -9,3 +9,4 @@ vl-convert-python>=1.0.0
 Pillow>=10.0.0
 gspread>=5.12.0
 google-auth>=2.23.0
+streamlit-aggrid

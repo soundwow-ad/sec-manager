@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import time
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 from services_utils import log_timing
 
@@ -257,18 +258,31 @@ def render_table1_tab(
                     "updated_at",
                 ]
                 show_cols = [c for c in desired_cols if c in show_df.columns]
-                disabled_cols = [c for c in show_cols if c != "選取"]
 
-                edited_df = st.data_editor(
-                    show_df[show_cols],
-                    column_config={
-                        "選取": st.column_config.CheckboxColumn("選取"),
-                    },
-                    disabled=disabled_cols,
-                    hide_index=True,
-                    height=360,
-                    key="seg_multi_edit_table",
+                grid_df = show_df[show_cols].copy()
+                gb = GridOptionsBuilder.from_dataframe(grid_df)
+                gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
+                # 讓「選取」欄位固定在最左邊，橫向捲動時不移動
+                gb.configure_column(
+                    "選取",
+                    header_name="選取",
+                    editable=True,
+                    pinned="left",
+                    width=90,
+                    checkboxSelection=True,
+                    headerCheckboxSelection=True,
+                    headerCheckboxSelectionFilteredOnly=True,
                 )
+                grid_options = gb.build()
+                grid_resp = AgGrid(
+                    grid_df,
+                    gridOptions=grid_options,
+                    update_mode=GridUpdateMode.VALUE_CHANGED,
+                    fit_columns_on_grid_load=False,
+                    height=360,
+                    key="seg_multi_edit_table_aggrid",
+                )
+                edited_df = pd.DataFrame(grid_resp.get("data", []))
 
                 new_seconds_type = st.selectbox(
                     "新的秒數用途(seconds_type)",
