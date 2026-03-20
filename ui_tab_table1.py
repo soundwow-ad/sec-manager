@@ -262,17 +262,24 @@ def render_table1_tab(
                 grid_df = show_df[show_cols].copy()
                 edited_df = pd.DataFrame()
                 aggrid_ok = False
-                aggrid_selected_ids = []
                 try:
-                    # AgGrid 使用 row selection checkbox，避免與資料欄位 checkbox 疊兩層
-                    grid_df_ag = grid_df.drop(columns=["選取"], errors="ignore")
-                    gb = GridOptionsBuilder.from_dataframe(grid_df_ag)
+                    gb = GridOptionsBuilder.from_dataframe(grid_df)
                     gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
-                    gb.configure_selection(selection_mode="multiple", use_checkbox=True, header_checkbox=True)
-                    gb.configure_grid_options(suppressRowClickSelection=False)
+                    # 只保留一套勾選欄，並固定在左側
+                    gb.configure_column(
+                        "選取",
+                        header_name="選取",
+                        editable=True,
+                        pinned="left",
+                        width=90,
+                        checkboxSelection=True,
+                        headerCheckboxSelection=True,
+                        headerCheckboxSelectionFilteredOnly=True,
+                    )
+                    gb.configure_grid_options(rowSelection="multiple", suppressRowClickSelection=False)
                     grid_options = gb.build()
                     grid_resp = AgGrid(
-                        grid_df_ag,
+                        grid_df,
                         gridOptions=grid_options,
                         update_mode=GridUpdateMode.VALUE_CHANGED,
                         fit_columns_on_grid_load=False,
@@ -280,11 +287,6 @@ def render_table1_tab(
                         key="seg_multi_edit_table_aggrid",
                     )
                     edited_df = pd.DataFrame(grid_resp.get("data", []))
-                    _sel = grid_resp.get("selected_rows", [])
-                    if isinstance(_sel, list):
-                        aggrid_selected_ids = [str(r.get("segment_id")) for r in _sel if isinstance(r, dict) and r.get("segment_id")]
-                    elif isinstance(_sel, pd.DataFrame) and "segment_id" in _sel.columns:
-                        aggrid_selected_ids = _sel["segment_id"].astype(str).tolist()
                     aggrid_ok = not edited_df.empty or grid_df.empty
                 except Exception:
                     aggrid_ok = False
@@ -308,10 +310,7 @@ def render_table1_tab(
                 )
 
                 auto_sync = st.checkbox("套用後立即同步 Google Sheet", value=True, key="seg_multi_edit_auto_sync")
-                if aggrid_ok:
-                    seg_id_selected_list = aggrid_selected_ids
-                else:
-                    seg_id_selected_list = edited_df.loc[edited_df["選取"] == True, "segment_id"].astype(str).tolist() if "segment_id" in edited_df.columns else []
+                seg_id_selected_list = edited_df.loc[edited_df["選取"] == True, "segment_id"].astype(str).tolist() if "segment_id" in edited_df.columns else []
 
                 if st.button("批次套用並同步", type="primary", disabled=len(seg_id_selected_list) == 0, key="seg_multi_edit_apply_sync"):
                     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
