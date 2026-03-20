@@ -260,29 +260,47 @@ def render_table1_tab(
                 show_cols = [c for c in desired_cols if c in show_df.columns]
 
                 grid_df = show_df[show_cols].copy()
-                gb = GridOptionsBuilder.from_dataframe(grid_df)
-                gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
-                # 讓「選取」欄位固定在最左邊，橫向捲動時不移動
-                gb.configure_column(
-                    "選取",
-                    header_name="選取",
-                    editable=True,
-                    pinned="left",
-                    width=90,
-                    checkboxSelection=True,
-                    headerCheckboxSelection=True,
-                    headerCheckboxSelectionFilteredOnly=True,
-                )
-                grid_options = gb.build()
-                grid_resp = AgGrid(
-                    grid_df,
-                    gridOptions=grid_options,
-                    update_mode=GridUpdateMode.VALUE_CHANGED,
-                    fit_columns_on_grid_load=False,
-                    height=360,
-                    key="seg_multi_edit_table_aggrid",
-                )
-                edited_df = pd.DataFrame(grid_resp.get("data", []))
+                edited_df = pd.DataFrame()
+                aggrid_ok = False
+                try:
+                    gb = GridOptionsBuilder.from_dataframe(grid_df)
+                    gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
+                    gb.configure_grid_options(rowSelection="multiple", suppressRowClickSelection=False)
+                    # 讓「選取」欄位固定在最左邊，橫向捲動時不移動
+                    gb.configure_column(
+                        "選取",
+                        header_name="選取",
+                        editable=True,
+                        pinned="left",
+                        width=90,
+                        checkboxSelection=True,
+                        headerCheckboxSelection=True,
+                        headerCheckboxSelectionFilteredOnly=True,
+                    )
+                    grid_options = gb.build()
+                    grid_resp = AgGrid(
+                        grid_df,
+                        gridOptions=grid_options,
+                        update_mode=GridUpdateMode.VALUE_CHANGED,
+                        fit_columns_on_grid_load=False,
+                        height=360,
+                        key="seg_multi_edit_table_aggrid",
+                    )
+                    edited_df = pd.DataFrame(grid_resp.get("data", []))
+                    aggrid_ok = not edited_df.empty or grid_df.empty
+                except Exception:
+                    aggrid_ok = False
+
+                # 部分環境（尤其 Cloud）可能出現 AgGrid 空白渲染；fallback 回 data_editor 保證可用
+                if not aggrid_ok:
+                    edited_df = st.data_editor(
+                        grid_df,
+                        column_config={"選取": st.column_config.CheckboxColumn("選取")},
+                        disabled=[c for c in show_cols if c != "選取"],
+                        hide_index=True,
+                        height=360,
+                        key="seg_multi_edit_table_fallback",
+                    )
 
                 new_seconds_type = st.selectbox(
                     "新的秒數用途(seconds_type)",
