@@ -12,6 +12,57 @@ import pandas as pd
 import requests
 
 
+def _norm_text(v) -> str:
+    return str(v or "").strip()
+
+
+def _norm_num(v) -> float:
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+
+def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
+    return (
+        _norm_text(r.get("platform", "")),
+        _norm_text(r.get("client", "")),
+        _norm_text(r.get("product", "")),
+        _norm_text(r.get("sales", "")),
+        _norm_text(r.get("company", "")),
+        _norm_text(r.get("start_date", "")),
+        _norm_text(r.get("end_date", "")),
+        int(_norm_num(r.get("seconds", 0))),
+        int(_norm_num(r.get("spots", 0))),
+        _norm_num(r.get("amount_net", 0)),
+        _norm_text(r.get("contract_id", "")),
+        _norm_text(effective_seconds_type),
+        _norm_num(r.get("project_amount_net", 0)),
+        _norm_num(r.get("split_amount", 0)),
+    )
+
+
+def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
+    project_val = t[14] if len(t) > 14 else None
+    split_val = None
+    return (
+        _norm_text(t[1]),
+        _norm_text(t[2]),
+        _norm_text(t[3]),
+        _norm_text(t[4]),
+        _norm_text(t[5]),
+        _norm_text(t[6]),
+        _norm_text(t[7]),
+        int(_norm_num(t[8])),
+        int(_norm_num(t[9])),
+        _norm_num(t[10]),
+        _norm_text(t[12]),
+        _norm_text(effective_seconds_type),
+        _norm_num(project_val),
+        _norm_num(split_val),
+    )
+
+
 def normalize_date(val) -> str:
     if pd.isna(val) or val == "" or val == "nan":
         return ""
@@ -272,16 +323,90 @@ def import_google_sheet_to_orders_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        if replace_existing:
-            c.execute("DELETE FROM orders")
+        existing_rows: dict[str, dict] = {}
+        df_existing = pd.read_sql(
+            """
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount
+            FROM orders
+            """,
+            conn,
+        )
+        if not df_existing.empty:
+            for _, rr in df_existing.iterrows():
+                oid = _norm_text(rr.get("id", ""))
+                if oid:
+                    existing_rows[oid] = rr.to_dict()
+
+        inserted_count = 0
+        updated_count = 0
+        skipped_count = 0
+
+        # 商業規則：不清空重建；僅在資料有變動時更新。
+        # 且若匯入列 seconds_type 為空，保留既有 seconds_type（避免覆蓋人工修正）。
         for t in orders:
             project_val = t[14] if len(t) > 14 else None
+            oid = _norm_text(t[0])
+            old_row = existing_rows.get(oid)
+            old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
+            incoming_seconds_type = _norm_text(t[13] if len(t) > 13 else "")
+            effective_seconds_type = old_seconds_type if incoming_seconds_type == "" else incoming_seconds_type
+
+            if old_row is None:
+                inserted_count += 1
+            else:
+                old_sig = _signature_from_existing_row(old_row, effective_seconds_type)
+                new_sig = _signature_from_tuple(t, effective_seconds_type)
+                if old_sig == new_sig:
+                    skipped_count += 1
+                else:
+                    updated_count += 1
+
             c.execute(
                 """
-                INSERT OR REPLACE INTO orders
+                INSERT INTO orders
                 (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
+                ON CONFLICT(id) DO UPDATE SET
+                    platform=excluded.platform,
+                    client=excluded.client,
+                    product=excluded.product,
+                    sales=excluded.sales,
+                    company=excluded.company,
+                    start_date=excluded.start_date,
+                    end_date=excluded.end_date,
+                    seconds=excluded.seconds,
+                    spots=excluded.spots,
+                    amount_net=excluded.amount_net,
+                    updated_at=excluded.updated_at,
+                    contract_id=excluded.contract_id,
+                    seconds_type=CASE
+                        WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                        ELSE excluded.seconds_type
+                    END,
+                    project_amount_net=excluded.project_amount_net,
+                    split_amount=excluded.split_amount
+                WHERE
+                    COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
+                    OR COALESCE(orders.client, '') != COALESCE(excluded.client, '')
+                    OR COALESCE(orders.product, '') != COALESCE(excluded.product, '')
+                    OR COALESCE(orders.sales, '') != COALESCE(excluded.sales, '')
+                    OR COALESCE(orders.company, '') != COALESCE(excluded.company, '')
+                    OR COALESCE(orders.start_date, '') != COALESCE(excluded.start_date, '')
+                    OR COALESCE(orders.end_date, '') != COALESCE(excluded.end_date, '')
+                    OR COALESCE(orders.seconds, 0) != COALESCE(excluded.seconds, 0)
+                    OR COALESCE(orders.spots, 0) != COALESCE(excluded.spots, 0)
+                    OR COALESCE(orders.amount_net, 0) != COALESCE(excluded.amount_net, 0)
+                    OR COALESCE(orders.contract_id, '') != COALESCE(excluded.contract_id, '')
+                    OR COALESCE(orders.seconds_type, '') != COALESCE(
+                        CASE
+                            WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                            ELSE excluded.seconds_type
+                        END,
+                        ''
+                    )
+                    OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
+                    OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
+                """,
                 (*t[:14], project_val, None),
             )
         conn.commit()
@@ -303,7 +428,10 @@ def import_google_sheet_to_orders_service(
             if cid:
                 compute_and_save_split_amount_for_contract(str(cid))
         sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
-        return True, f"已匯入 {len(orders)} 筆（表1結構）；若有專案實收金額已自動計算拆分金額）"
+        return True, (
+            f"已處理 {len(orders)} 筆（新增 {inserted_count}、更新 {updated_count}、略過 {skipped_count}）；"
+            "若有專案實收金額已自動計算拆分金額。"
+        )
     except Exception as e:
         conn.rollback()
         conn.close()

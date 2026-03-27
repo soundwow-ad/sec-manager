@@ -17,13 +17,13 @@ def render_sidebar_google_import(*, import_google_sheet_to_orders):
             placeholder="https://docs.google.com/spreadsheets/d/xxx/edit 或 貼上 ID",
             key="gs_import_url",
         )
-        gs_replace = st.checkbox("匯入時取代現有資料", value=True, key="gs_replace")
+        st.caption("匯入策略：不清空舊資料，僅新增/更新有變動的列。")
         if st.button("📥 匯入（表1結構）", key="gs_import_btn"):
             if not (gs_url or "").strip():
                 st.warning("請輸入試算表網址或 ID")
             else:
                 with st.spinner("正在讀取試算表並匯入..."):
-                    success, msg = import_google_sheet_to_orders(gs_url.strip(), replace_existing=gs_replace)
+                    success, msg = import_google_sheet_to_orders(gs_url.strip(), replace_existing=False)
                     if success:
                         st.success(msg)
                         time.sleep(0.5)

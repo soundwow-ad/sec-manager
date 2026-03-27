@@ -49,7 +49,7 @@ def render_sidebar_ragic_import(
             ragic_date_from = st.date_input("起日", value=date.today() - timedelta(days=30), key="ragic_import_date_from")
         with d2:
             ragic_date_to = st.date_input("迄日", value=date.today(), key="ragic_import_date_to")
-        ragic_replace = st.checkbox("匯入時取代現有資料", value=False, key="ragic_import_replace")
+        st.caption("匯入策略：不清空舊資料，僅新增/更新有變動的列。")
         if st.button("📥 匯入 Ragic 區間資料", key="btn_ragic_import_range"):
             if ragic_date_from > ragic_date_to:
                 st.error("日期區間錯誤：起日不可大於迄日")
@@ -65,7 +65,7 @@ def render_sidebar_ragic_import(
                         date_from=ragic_date_from,
                         date_to=ragic_date_to,
                         date_field=ragic_date_field,
-                        replace_existing=ragic_replace,
+                        replace_existing=False,
                     )
                     st.session_state["_ragic_last_batch_id"] = batch_id
                     if ok:

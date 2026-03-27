@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import hashlib
 import uuid
 from typing import Callable
 
@@ -46,6 +47,164 @@ def _log_ragic_import(
         conn.close()
     except Exception:
         pass
+
+
+def _make_ragic_order_id(
+    *,
+    ragic_id: str,
+    order_no: str,
+    file_token: str,
+    unit_idx: int,
+    platform: str,
+    client: str,
+    product: str,
+    sales: str,
+    company: str,
+    start_date: str,
+    end_date: str,
+    seconds: int,
+    spots: int,
+) -> str:
+    """用穩定鍵產生 order_id，避免每次匯入都新建不同 id。"""
+    stable_key = "|".join(
+        map(
+            str,
+            [
+                ragic_id or "",
+                order_no or "",
+                file_token or "",
+                unit_idx,
+                platform or "",
+                client or "",
+                product or "",
+                sales or "",
+                company or "",
+                start_date or "",
+                end_date or "",
+                int(seconds or 0),
+                int(spots or 0),
+            ],
+        )
+    )
+    digest = hashlib.sha1(stable_key.encode("utf-8")).hexdigest()[:14]
+    return f"ragic_{ragic_id}_{digest}"
+
+
+def _order_match_key(
+    *,
+    platform: str,
+    client: str,
+    product: str,
+    sales: str,
+    company: str,
+    start_date: str,
+    end_date: str,
+    seconds: int,
+    spots: int,
+    contract_id: str,
+) -> tuple:
+    return (
+        str(platform or "").strip(),
+        str(client or "").strip(),
+        str(product or "").strip(),
+        str(sales or "").strip(),
+        str(company or "").strip(),
+        str(start_date or "").strip(),
+        str(end_date or "").strip(),
+        int(seconds or 0),
+        int(spots or 0),
+        str(contract_id or "").strip(),
+    )
+
+
+def _load_existing_order_id_map(get_db_connection: Callable[[], object]) -> dict[tuple, str]:
+    mapping: dict[tuple, str] = {}
+    conn = None
+    try:
+        conn = get_db_connection()
+        df_old = pd.read_sql(
+            """
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, contract_id
+            FROM orders
+            """,
+            conn,
+        )
+        for _, r in df_old.iterrows():
+            key = _order_match_key(
+                platform=r.get("platform", ""),
+                client=r.get("client", ""),
+                product=r.get("product", ""),
+                sales=r.get("sales", ""),
+                company=r.get("company", ""),
+                start_date=r.get("start_date", ""),
+                end_date=r.get("end_date", ""),
+                seconds=r.get("seconds", 0),
+                spots=r.get("spots", 0),
+                contract_id=r.get("contract_id", ""),
+            )
+            oid = str(r.get("id") or "").strip()
+            if oid:
+                mapping[key] = oid
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+    return mapping
+
+
+def _norm_text(v) -> str:
+    return str(v or "").strip()
+
+
+def _norm_num(v) -> float:
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+
+def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
+    return (
+        _norm_text(r.get("platform", "")),
+        _norm_text(r.get("client", "")),
+        _norm_text(r.get("product", "")),
+        _norm_text(r.get("sales", "")),
+        _norm_text(r.get("company", "")),
+        _norm_text(r.get("start_date", "")),
+        _norm_text(r.get("end_date", "")),
+        int(_norm_num(r.get("seconds", 0))),
+        int(_norm_num(r.get("spots", 0))),
+        _norm_num(r.get("amount_net", 0)),
+        _norm_text(r.get("contract_id", "")),
+        _norm_text(effective_seconds_type),
+        _norm_num(r.get("project_amount_net", 0)),
+        _norm_num(r.get("split_amount", 0)),
+    )
+
+
+def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
+    project_val = t[14] if len(t) > 14 else None
+    split_val = t[15] if len(t) > 15 else None
+    return (
+        _norm_text(t[1]),
+        _norm_text(t[2]),
+        _norm_text(t[3]),
+        _norm_text(t[4]),
+        _norm_text(t[5]),
+        _norm_text(t[6]),
+        _norm_text(t[7]),
+        int(_norm_num(t[8])),
+        int(_norm_num(t[9])),
+        _norm_num(t[10]),
+        _norm_text(t[12]),
+        _norm_text(effective_seconds_type),
+        _norm_num(project_val),
+        _norm_num(split_val),
+    )
 
 
 def import_ragic_to_orders_by_date_range_service(
@@ -185,6 +344,7 @@ def import_ragic_to_orders_by_date_range_service(
     if not filtered:
         return False, "指定日期區間內無資料", batch_id
 
+    existing_order_id_map = _load_existing_order_id_map(get_db_connection)
     order_rows = []
     parsed_files = 0
     cue_unit_candidates = 0
@@ -238,7 +398,6 @@ def import_ragic_to_orders_by_date_range_service(
                 days = int(u.get("days") or len(daily_spots) or 1)
                 total_spots = int(u.get("total_spots") or (sum(daily_spots) if daily_spots else 0))
                 spots = int(round(total_spots / max(days, 1))) if total_spots > 0 else int(daily_spots[0] if daily_spots else 0)
-                order_id = f"ragic_{ragic_id}_{file_i}_{i}_{uuid.uuid4().hex[:6]}"
                 start_date = str(u.get("start_date") or ragic_get_field(entry, "執行開始日期") or "")
                 end_date = str(u.get("end_date") or ragic_get_field(entry, "執行結束日期") or "")
                 seconds = int(u.get("seconds") or 0)
@@ -263,6 +422,33 @@ def import_ragic_to_orders_by_date_range_service(
                 if pd.isna(s_date) or pd.isna(e_date):
                     skipped["invalid_dates_after_parse"] += 1
                     continue
+                match_key = _order_match_key(
+                    platform=platform,
+                    client=order_info["client"],
+                    product=order_info["product"],
+                    sales=order_info["sales"],
+                    company=order_info["company"],
+                    start_date=start_date_norm,
+                    end_date=end_date_norm,
+                    seconds=seconds,
+                    spots=spots,
+                    contract_id=str(order_no),
+                )
+                order_id = existing_order_id_map.get(match_key) or _make_ragic_order_id(
+                    ragic_id=str(ragic_id),
+                    order_no=str(order_no),
+                    file_token=str(token),
+                    unit_idx=i,
+                    platform=platform,
+                    client=order_info["client"],
+                    product=order_info["product"],
+                    sales=order_info["sales"],
+                    company=order_info["company"],
+                    start_date=start_date_norm,
+                    end_date=end_date_norm,
+                    seconds=seconds,
+                    spots=spots,
+                )
                 order_rows.append(
                     (
                         order_id,
@@ -313,13 +499,84 @@ def import_ragic_to_orders_by_date_range_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        if replace_existing:
-            c.execute("DELETE FROM orders")
+        existing_rows: dict[str, dict] = {}
+        df_existing = pd.read_sql(
+            """
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount
+            FROM orders
+            """,
+            conn,
+        )
+        if not df_existing.empty:
+            for _, rr in df_existing.iterrows():
+                oid = _norm_text(rr.get("id", ""))
+                if oid:
+                    existing_rows[oid] = rr.to_dict()
+
+        inserted_count = 0
+        updated_count = 0
+        skipped_count = 0
+        for t in order_rows:
+            oid = _norm_text(t[0])
+            old_row = existing_rows.get(oid)
+            old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
+            incoming_seconds_type = _norm_text(t[13] if len(t) > 13 else "")
+            effective_seconds_type = old_seconds_type if incoming_seconds_type == "" else incoming_seconds_type
+            if old_row is None:
+                inserted_count += 1
+            else:
+                old_sig = _signature_from_existing_row(old_row, effective_seconds_type)
+                new_sig = _signature_from_tuple(t, effective_seconds_type)
+                if old_sig == new_sig:
+                    skipped_count += 1
+                else:
+                    updated_count += 1
+
         c.executemany(
             """
-            INSERT OR REPLACE INTO orders
+            INSERT INTO orders
             (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                platform=excluded.platform,
+                client=excluded.client,
+                product=excluded.product,
+                sales=excluded.sales,
+                company=excluded.company,
+                start_date=excluded.start_date,
+                end_date=excluded.end_date,
+                seconds=excluded.seconds,
+                spots=excluded.spots,
+                amount_net=excluded.amount_net,
+                updated_at=excluded.updated_at,
+                contract_id=excluded.contract_id,
+                seconds_type=CASE
+                    WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                    ELSE excluded.seconds_type
+                END,
+                project_amount_net=excluded.project_amount_net,
+                split_amount=excluded.split_amount
+            WHERE
+                COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
+                OR COALESCE(orders.client, '') != COALESCE(excluded.client, '')
+                OR COALESCE(orders.product, '') != COALESCE(excluded.product, '')
+                OR COALESCE(orders.sales, '') != COALESCE(excluded.sales, '')
+                OR COALESCE(orders.company, '') != COALESCE(excluded.company, '')
+                OR COALESCE(orders.start_date, '') != COALESCE(excluded.start_date, '')
+                OR COALESCE(orders.end_date, '') != COALESCE(excluded.end_date, '')
+                OR COALESCE(orders.seconds, 0) != COALESCE(excluded.seconds, 0)
+                OR COALESCE(orders.spots, 0) != COALESCE(excluded.spots, 0)
+                OR COALESCE(orders.amount_net, 0) != COALESCE(excluded.amount_net, 0)
+                OR COALESCE(orders.contract_id, '') != COALESCE(excluded.contract_id, '')
+                OR COALESCE(orders.seconds_type, '') != COALESCE(
+                    CASE
+                        WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                        ELSE excluded.seconds_type
+                    END,
+                    ''
+                )
+                OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
+                OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
             """,
             order_rows,
         )
@@ -347,9 +604,19 @@ def import_ragic_to_orders_by_date_range_service(
             status="success",
             phase="insert",
             imported_orders=len(order_rows),
-            message=f"匯入完成：entries={len(filtered)} files={parsed_files} rows={len(order_rows)}",
+            message=(
+                f"匯入完成：entries={len(filtered)} files={parsed_files} rows={len(order_rows)} "
+                f"inserted={inserted_count} updated={updated_count} skipped={skipped_count}"
+            ),
         )
-        return True, f"Ragic 匯入完成：{len(order_rows)} 筆（來源 entries={len(filtered)}，成功檔案={parsed_files}）", batch_id
+        return (
+            True,
+            (
+                f"Ragic 匯入完成：{len(order_rows)} 筆（來源 entries={len(filtered)}，成功檔案={parsed_files}，"
+                f"新增 {inserted_count}、更新 {updated_count}、略過 {skipped_count}）"
+            ),
+            batch_id,
+        )
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -500,6 +767,7 @@ def import_ragic_single_entry_to_orders_service(
         _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="failed", phase="download", ragic_id=ragic_id_str, order_no=str(order_no), message="無可下載的 CUE Excel 附件")
         return False, "此筆 Ragic 沒有可下載/可解析的 CUE Excel 附件。", batch_id
 
+    existing_order_id_map = _load_existing_order_id_map(get_db_connection)
     order_rows: list[tuple] = []
     parsed_files = 0
     cue_unit_candidates = 0
@@ -531,7 +799,6 @@ def import_ragic_single_entry_to_orders_service(
             days = int(u.get("days") or len(daily_spots) or 1)
             total_spots = int(u.get("total_spots") or (sum(daily_spots) if daily_spots else 0))
             spots = int(round(total_spots / max(days, 1))) if total_spots > 0 else int(daily_spots[0] if daily_spots else 0)
-            order_id = f"ragic_{ragic_id_str}_{file_i}_{i}_{uuid.uuid4().hex[:6]}"
             start_date_raw = str(u.get("start_date") or ragic_get_field(entry, "執行開始日期") or "")
             end_date_raw = str(u.get("end_date") or ragic_get_field(entry, "執行結束日期") or "")
             seconds = int(u.get("seconds") or 0)
@@ -556,6 +823,33 @@ def import_ragic_single_entry_to_orders_service(
             if pd.isna(s_date) or pd.isna(e_date):
                 skipped["invalid_dates_after_parse"] += 1
                 continue
+            match_key = _order_match_key(
+                platform=platform_raw,
+                client=order_info["client"],
+                product=order_info["product"],
+                sales=order_info["sales"],
+                company=order_info["company"],
+                start_date=start_date_norm,
+                end_date=end_date_norm,
+                seconds=seconds,
+                spots=spots,
+                contract_id=str(order_no),
+            )
+            order_id = existing_order_id_map.get(match_key) or _make_ragic_order_id(
+                ragic_id=str(ragic_id_str),
+                order_no=str(order_no),
+                file_token=str(token),
+                unit_idx=i,
+                platform=platform_raw,
+                client=order_info["client"],
+                product=order_info["product"],
+                sales=order_info["sales"],
+                company=order_info["company"],
+                start_date=start_date_norm,
+                end_date=end_date_norm,
+                seconds=seconds,
+                spots=spots,
+            )
 
             order_rows.append(
                     (
@@ -607,13 +901,84 @@ def import_ragic_single_entry_to_orders_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        if replace_existing:
-            c.execute("DELETE FROM orders")
+        existing_rows: dict[str, dict] = {}
+        df_existing = pd.read_sql(
+            """
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount
+            FROM orders
+            """,
+            conn,
+        )
+        if not df_existing.empty:
+            for _, rr in df_existing.iterrows():
+                oid = _norm_text(rr.get("id", ""))
+                if oid:
+                    existing_rows[oid] = rr.to_dict()
+
+        inserted_count = 0
+        updated_count = 0
+        skipped_count = 0
+        for t in order_rows:
+            oid = _norm_text(t[0])
+            old_row = existing_rows.get(oid)
+            old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
+            incoming_seconds_type = _norm_text(t[13] if len(t) > 13 else "")
+            effective_seconds_type = old_seconds_type if incoming_seconds_type == "" else incoming_seconds_type
+            if old_row is None:
+                inserted_count += 1
+            else:
+                old_sig = _signature_from_existing_row(old_row, effective_seconds_type)
+                new_sig = _signature_from_tuple(t, effective_seconds_type)
+                if old_sig == new_sig:
+                    skipped_count += 1
+                else:
+                    updated_count += 1
+
         c.executemany(
             """
-            INSERT OR REPLACE INTO orders
+            INSERT INTO orders
             (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                platform=excluded.platform,
+                client=excluded.client,
+                product=excluded.product,
+                sales=excluded.sales,
+                company=excluded.company,
+                start_date=excluded.start_date,
+                end_date=excluded.end_date,
+                seconds=excluded.seconds,
+                spots=excluded.spots,
+                amount_net=excluded.amount_net,
+                updated_at=excluded.updated_at,
+                contract_id=excluded.contract_id,
+                seconds_type=CASE
+                    WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                    ELSE excluded.seconds_type
+                END,
+                project_amount_net=excluded.project_amount_net,
+                split_amount=excluded.split_amount
+            WHERE
+                COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
+                OR COALESCE(orders.client, '') != COALESCE(excluded.client, '')
+                OR COALESCE(orders.product, '') != COALESCE(excluded.product, '')
+                OR COALESCE(orders.sales, '') != COALESCE(excluded.sales, '')
+                OR COALESCE(orders.company, '') != COALESCE(excluded.company, '')
+                OR COALESCE(orders.start_date, '') != COALESCE(excluded.start_date, '')
+                OR COALESCE(orders.end_date, '') != COALESCE(excluded.end_date, '')
+                OR COALESCE(orders.seconds, 0) != COALESCE(excluded.seconds, 0)
+                OR COALESCE(orders.spots, 0) != COALESCE(excluded.spots, 0)
+                OR COALESCE(orders.amount_net, 0) != COALESCE(excluded.amount_net, 0)
+                OR COALESCE(orders.contract_id, '') != COALESCE(excluded.contract_id, '')
+                OR COALESCE(orders.seconds_type, '') != COALESCE(
+                    CASE
+                        WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
+                        ELSE excluded.seconds_type
+                    END,
+                    ''
+                )
+                OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
+                OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
             """,
             order_rows,
         )
@@ -643,9 +1008,19 @@ def import_ragic_single_entry_to_orders_service(
             status="success",
             phase="insert",
             imported_orders=len(order_rows),
-            message=f"單筆匯入完成：files={parsed_files} rows={len(order_rows)}",
+            message=(
+                f"單筆匯入完成：files={parsed_files} rows={len(order_rows)} "
+                f"inserted={inserted_count} updated={updated_count} skipped={skipped_count}"
+            ),
         )
-        return True, f"Ragic 單筆匯入完成：{len(order_rows)} 筆（成功檔案={parsed_files}）", batch_id
+        return (
+            True,
+            (
+                f"Ragic 單筆匯入完成：{len(order_rows)} 筆（成功檔案={parsed_files}，"
+                f"新增 {inserted_count}、更新 {updated_count}、略過 {skipped_count}）"
+            ),
+            batch_id,
+        )
     except Exception as e:
         conn.rollback()
         conn.close()

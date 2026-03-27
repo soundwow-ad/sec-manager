@@ -641,7 +641,7 @@ def render_ragic_test_tab(
 
     if import_ragic_single_entry_to_orders:
         st.caption("可將這筆單一 Ragic 案子匯入至 `orders` / `segments`（無法產生 segment 的列會被略過並寫入匯入紀錄）。")
-        ragic_replace_single = st.checkbox("匯入時取代現有資料", value=False, key="ragic_import_replace_single")
+        st.caption("匯入策略：不清空舊資料，僅新增/更新有變動的列。")
         api_key_use = api_key_input or api_key
         if st.button("📥 匯入此單筆到資料庫", type="primary", key="ragic_import_single_btn") and (str(ragic_url or "").strip()):
             if not api_key_use or not str(api_key_use).strip():
@@ -652,7 +652,7 @@ def render_ragic_test_tab(
                     ragic_url=ragic_url.strip(),
                     api_key=str(api_key_use).strip(),
                     ragic_id=rid,
-                    replace_existing=ragic_replace_single,
+                    replace_existing=False,
                 )
             if ok:
                 st.success(msg)
