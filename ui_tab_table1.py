@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import time
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 from services_utils import log_timing
 
@@ -225,11 +224,15 @@ def render_table1_tab(
                     # 對帳欄位可用就好，失敗不影響主流程
                     pass
 
-            show_df = df_for_edit.head(200).copy()
+            max_rows = st.number_input("顯示筆數上限", min_value=50, max_value=2000, value=300, step=50, key="seg_edit_limit")
+            show_df = df_for_edit.head(int(max_rows)).copy()
             if show_df.empty:
-                st.info("符合條件但沒有可顯示的 records（顯示上限 200 筆）。")
+                st.info(f"符合條件但沒有可顯示的 records（顯示上限 {int(max_rows)} 筆）。")
             else:
-                show_df["選取"] = False
+                if "seg_selected_ids" not in st.session_state:
+                    st.session_state["seg_selected_ids"] = []
+                selected_set = set(str(x) for x in st.session_state.get("seg_selected_ids", []))
+
                 show_df["segment_id_short"] = show_df["segment_id"].astype(str).str[:8]
 
                 # 顯示欄位：盡量對齊表1常用對帳欄（Segments 本身沒有小時/每日欄位，所以用 segments 可用的詳細度）
@@ -260,47 +263,37 @@ def render_table1_tab(
                 show_cols = [c for c in desired_cols if c in show_df.columns]
 
                 grid_df = show_df[show_cols].copy()
-                edited_df = pd.DataFrame()
-                aggrid_ok = False
-                try:
-                    gb = GridOptionsBuilder.from_dataframe(grid_df)
-                    gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
-                    # 只保留一套勾選欄，並固定在左側
-                    gb.configure_column(
-                        "選取",
-                        header_name="選取",
-                        editable=True,
-                        pinned="left",
-                        width=90,
-                        checkboxSelection=True,
-                        headerCheckboxSelection=True,
-                        headerCheckboxSelectionFilteredOnly=True,
-                    )
-                    gb.configure_grid_options(rowSelection="multiple", suppressRowClickSelection=False)
-                    grid_options = gb.build()
-                    grid_resp = AgGrid(
-                        grid_df,
-                        gridOptions=grid_options,
-                        update_mode=GridUpdateMode.VALUE_CHANGED,
-                        fit_columns_on_grid_load=False,
-                        height=360,
-                        key="seg_multi_edit_table_aggrid",
-                    )
-                    edited_df = pd.DataFrame(grid_resp.get("data", []))
-                    aggrid_ok = not edited_df.empty or grid_df.empty
-                except Exception:
-                    aggrid_ok = False
+                visible_ids = grid_df["segment_id"].astype(str).tolist() if "segment_id" in grid_df.columns else []
 
-                # 部分環境（尤其 Cloud）可能出現 AgGrid 空白渲染；fallback 回 data_editor 保證可用
-                if not aggrid_ok:
-                    edited_df = st.data_editor(
-                        grid_df,
-                        column_config={"選取": st.column_config.CheckboxColumn("選取")},
-                        disabled=[c for c in show_cols if c != "選取"],
-                        hide_index=True,
-                        height=360,
-                        key="seg_multi_edit_table_fallback",
-                    )
+                ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 2])
+                with ctrl1:
+                    if st.button("全選目前列表", key="seg_select_all_visible"):
+                        selected_set.update(visible_ids)
+                        st.session_state["seg_selected_ids"] = sorted(selected_set)
+                        st.rerun()
+                with ctrl2:
+                    if st.button("清空目前列表", key="seg_clear_all_visible"):
+                        selected_set.difference_update(visible_ids)
+                        st.session_state["seg_selected_ids"] = sorted(selected_set)
+                        st.rerun()
+                with ctrl3:
+                    st.caption(f"目前已選取：{len(selected_set)} 筆（跨篩選條件保留）")
+
+                grid_df["選取"] = grid_df["segment_id"].astype(str).isin(selected_set) if "segment_id" in grid_df.columns else False
+                # 穩定模式：直接使用 data_editor，避免部分環境 AgGrid 會出現「有筆數但畫面空白」。
+                edited_df = st.data_editor(
+                    grid_df,
+                    column_config={"選取": st.column_config.CheckboxColumn("選取")},
+                    disabled=[c for c in show_cols if c != "選取"],
+                    hide_index=True,
+                    height=360,
+                    key="seg_multi_edit_table",
+                )
+                if "segment_id" in edited_df.columns and "選取" in edited_df.columns:
+                    selected_now = edited_df.loc[edited_df["選取"] == True, "segment_id"].astype(str).tolist()
+                    selected_set.difference_update(visible_ids)
+                    selected_set.update(selected_now)
+                    st.session_state["seg_selected_ids"] = sorted(selected_set)
 
                 new_seconds_type = st.selectbox(
                     "新的秒數用途(seconds_type)",
@@ -310,7 +303,7 @@ def render_table1_tab(
                 )
 
                 auto_sync = st.checkbox("套用後立即同步 Google Sheet", value=True, key="seg_multi_edit_auto_sync")
-                seg_id_selected_list = edited_df.loc[edited_df["選取"] == True, "segment_id"].astype(str).tolist() if "segment_id" in edited_df.columns else []
+                seg_id_selected_list = sorted(set(str(x) for x in st.session_state.get("seg_selected_ids", [])))
 
                 if st.button("批次套用並同步", type="primary", disabled=len(seg_id_selected_list) == 0, key="seg_multi_edit_apply_sync"):
                     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -390,6 +383,7 @@ def render_table1_tab(
                         del st.session_state["_table1_cache_key"]
                     # 下一輪 rerun 前先設定旗標；在 checkbox 建立之前切回 False。
                     st.session_state["_seg_force_show_all"] = True
+                    st.session_state["seg_selected_ids"] = []
                     st.success(f"✅ 已批次更新 {len(seg_id_selected_list)} 筆 segments 的 seconds_type。")
                     st.rerun()
 
