@@ -22,13 +22,15 @@ def render_sidebar_account(
     st.sidebar.caption(f"👤 {user['username']}（{role}）")
 
     try:
-        from sheets_backend import is_sheets_enabled, get_sheets_status
+        from sheets_backend import is_sheets_enabled, get_sheets_status, get_sheets_url
 
         sheets_on = is_sheets_enabled()
         sheets_status, sheets_reason = get_sheets_status()
+        sheets_url = get_sheets_url()
     except Exception:
         sheets_on = False
         sheets_status, sheets_reason = "disabled", "無法載入設定"
+        sheets_url = None
     if sheets_on:
         load_errs = st.session_state.get("_sheets_load_errors")
         if load_errs:
@@ -48,6 +50,8 @@ def render_sidebar_account(
                 st.sidebar.error(msg)
             else:
                 st.sidebar.success(msg)
+        if role in ("行政主管", "總經理") and sheets_url:
+            st.sidebar.link_button("🔗 開啟資料庫 Google Sheet", sheets_url, use_container_width=True)
     else:
         st.sidebar.caption("📄 未設定 Google Sheet（可於 .streamlit/secrets.toml 或 Cloud Secrets 設定）")
         if sheets_reason:

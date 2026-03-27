@@ -174,6 +174,14 @@ def get_sheets_status() -> tuple[str, str | None]:
     return "ok", None
 
 
+def get_sheets_url() -> str | None:
+    """回傳目前 DB 綁定的 Google Sheet 網址（未設定時回傳 None）。"""
+    sid = _get_sheet_id()
+    if not sid:
+        return None
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit#gid=0"
+
+
 def _get_sheet_id() -> str | None:
     config = _get_sheet_config()
     sid = config.get("sheet_id") or config.get("sheet_id_")
