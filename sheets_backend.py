@@ -10,9 +10,7 @@ import json
 import os
 import hashlib
 from typing import Any
-
 import pandas as pd
-
 
 # 各工作表名稱（與 DB 表對應）
 WS_ORDERS = "Orders"
@@ -463,6 +461,118 @@ def update_segments_seconds_type_rows(
             ws.batch_update(payload, value_input_option="USER_ENTERED")
         elif not errors:
             errors.append("沒有可更新的 segment_id")
+    except Exception as e:
+        errors.append(str(e))
+    return errors
+
+
+def _norm_date_text(v: str) -> str:
+    try:
+        dt = pd.to_datetime(str(v).strip(), errors="coerce")
+        if pd.isna(dt):
+            return ""
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def update_source_sheet_seconds_type(
+    *,
+    source_sheet_id: str,
+    updates: list[dict[str, Any]],
+) -> list[str]:
+    """
+    回寫「匯入來源表」的秒數用途。
+    updates 每筆需包含：
+      platform, company, sales, client, product, start_date, end_date, seconds, spots, seconds_type
+    回傳錯誤列表；空表示成功。
+    """
+    errors: list[str] = []
+    if not source_sheet_id or not updates:
+        return errors
+    try:
+        sh = _client()
+        if not sh:
+            return ["未設定或未啟用 Google Sheet"]
+        ws = sh.open_by_key(source_sheet_id).sheet1
+        values = ws.get_all_values() or []
+        if len(values) < 2:
+            return ["來源表內容不足，無法回寫"]
+
+        # 前 10 列找表頭（沿用匯入邏輯）
+        header_row_idx = None
+        for i in range(min(10, len(values))):
+            row_text = " ".join([str(x) for x in values[i]])
+            if "平台" in row_text and ("起始日" in row_text or "終止日" in row_text):
+                header_row_idx = i
+                break
+        if header_row_idx is None:
+            return ["來源表找不到表頭列（需含：平台、起始日/終止日）"]
+
+        header = [str(h).strip() for h in values[header_row_idx]]
+        req_cols = {
+            "platform": "平台",
+            "company": "公司",
+            "sales": "業務",
+            "client": "HYUNDAI_CUSTIN",
+            "product": "素材",
+            "start_date": "起始日",
+            "end_date": "終止日",
+            "seconds": "秒數",
+            "spots": "每天總檔次",
+            "seconds_type": "秒數用途",
+        }
+        col_idx = {}
+        for k, h in req_cols.items():
+            if h not in header:
+                if k == "spots" and "委刊總檔數" in header:
+                    col_idx[k] = header.index("委刊總檔數")
+                    continue
+                return [f"來源表缺少欄位：{h}"]
+            col_idx[k] = header.index(h)
+
+        # 建立待更新鍵值（同一鍵可對多列，全部更新）
+        update_map: dict[tuple, str] = {}
+        for u in updates:
+            key = (
+                str(u.get("platform", "")).strip(),
+                str(u.get("company", "")).strip(),
+                str(u.get("sales", "")).strip(),
+                str(u.get("client", "")).strip(),
+                str(u.get("product", "")).strip(),
+                _norm_date_text(u.get("start_date", "")),
+                _norm_date_text(u.get("end_date", "")),
+                str(int(float(u.get("seconds", 0) or 0))),
+                str(int(float(u.get("spots", 0) or 0))),
+            )
+            update_map[key] = str(u.get("seconds_type", "") or "")
+
+        payload = []
+        matched = 0
+        for ridx in range(header_row_idx + 1, len(values)):
+            row = values[ridx]
+            key = (
+                str(row[col_idx["platform"]]).strip() if len(row) > col_idx["platform"] else "",
+                str(row[col_idx["company"]]).strip() if len(row) > col_idx["company"] else "",
+                str(row[col_idx["sales"]]).strip() if len(row) > col_idx["sales"] else "",
+                str(row[col_idx["client"]]).strip() if len(row) > col_idx["client"] else "",
+                str(row[col_idx["product"]]).strip() if len(row) > col_idx["product"] else "",
+                _norm_date_text(row[col_idx["start_date"]]) if len(row) > col_idx["start_date"] else "",
+                _norm_date_text(row[col_idx["end_date"]]) if len(row) > col_idx["end_date"] else "",
+                str(int(float((row[col_idx["seconds"]] if len(row) > col_idx["seconds"] else "0") or 0))),
+                str(int(float((row[col_idx["spots"]] if len(row) > col_idx["spots"] else "0") or 0))),
+            )
+            if key in update_map:
+                a1 = f"{_col_to_a1(col_idx['seconds_type'] + 1)}{ridx + 1}"
+                payload.append({"range": a1, "values": [[update_map[key]]]})
+                matched += 1
+
+        if payload:
+            ws.batch_update(payload, value_input_option="USER_ENTERED")
+        else:
+            errors.append("來源表找不到可匹配列（未回寫任何秒數用途）")
+        if matched < len(update_map):
+            errors.append(f"來源表僅匹配到 {matched} 列，預期至少 {len(update_map)} 列。")
     except Exception as e:
         errors.append(str(e))
     return errors

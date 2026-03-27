@@ -314,6 +314,7 @@ def render_table1_tab(
 
                 if st.button("批次套用並同步", type="primary", disabled=len(seg_id_selected_list) == 0, key="seg_multi_edit_apply_sync"):
                     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    selected_rows_df = seg_source_df[seg_source_df["segment_id"].astype(str).isin(seg_id_selected_list)].copy() if "segment_id" in seg_source_df.columns else pd.DataFrame()
                     conn_upd = get_db_connection()
                     try:
                         conn_upd.executemany(
@@ -352,6 +353,39 @@ def render_table1_tab(
                         else:
                             for m in sync_msgs:
                                 st.caption(f"✅ {m}")
+
+                        # 若有匯入來源表 URL，回寫來源表的「秒數用途」欄位（逐列匹配）
+                        try:
+                            src_url = (st.session_state.get("gs_import_url") or "").strip()
+                            if src_url and not selected_rows_df.empty:
+                                from services_google_import import extract_google_sheet_id
+                                from sheets_backend import update_source_sheet_seconds_type
+
+                                src_sheet_id = extract_google_sheet_id(src_url) or ""
+                                if src_sheet_id:
+                                    src_updates = []
+                                    for _, r in selected_rows_df.iterrows():
+                                        src_updates.append(
+                                            {
+                                                "platform": r.get("platform", ""),
+                                                "company": r.get("company", ""),
+                                                "sales": r.get("sales", ""),
+                                                "client": r.get("client", ""),
+                                                "product": r.get("product", ""),
+                                                "start_date": r.get("start_date", ""),
+                                                "end_date": r.get("end_date", ""),
+                                                "seconds": r.get("seconds", 0),
+                                                "spots": r.get("spots", 0),
+                                                "seconds_type": new_seconds_type,
+                                            }
+                                        )
+                                    src_errs = update_source_sheet_seconds_type(source_sheet_id=src_sheet_id, updates=src_updates)
+                                    if src_errs:
+                                        st.warning("來源匯入表回寫提示：" + "; ".join(src_errs[:3]))
+                                    else:
+                                        st.caption("✅ 已回寫匯入來源表的秒數用途。")
+                        except Exception as e:
+                            st.warning(f"來源匯入表回寫例外：{e}")
                     if "_table1_cache_key" in st.session_state:
                         del st.session_state["_table1_cache_key"]
                     # 下一輪 rerun 前先設定旗標；在 checkbox 建立之前切回 False。

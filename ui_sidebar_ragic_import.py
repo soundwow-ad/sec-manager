@@ -23,10 +23,17 @@ def render_sidebar_ragic_import(
             key="ragic_import_url",
             placeholder="https://ap13.ragic.com/soundwow/forms12/17",
         )
+        # 方便測試：若 secrets 未配置，先帶入暫時預設 key（之後可移除）
+        api_default = "MEwyTEExWHJQamRDalZ6N0hzQ2syZlBHNUNJeWhwZFBrM3BMM2tDRWd4aGIvZ1JxWTlYaGkyM0RoRmo1ZExHaA=="
         try:
-            api_default = st.secrets.get("RAGIC_API_KEY", "")
+            api_default = (
+                st.secrets.get("RAGIC_API_KEY")
+                or st.secrets.get("ragic", {}).get("api_key")
+                or st.secrets.get("RAGIC", {}).get("api_key")
+                or api_default
+            )
         except Exception:
-            api_default = ""
+            pass
         ragic_import_api_key = st.text_input("Ragic API Key", value=api_default, type="password", key="ragic_import_api_key")
         ragic_date_field = st.selectbox(
             "日期欄位",
