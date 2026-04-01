@@ -354,6 +354,8 @@ def render_table1_tab(
                         notes_by_contract: dict[str, list[str]] = {}
                         selected_count = int(len(seg_id_selected_list))
                         ragic_report_lines.append(f"選取 segments 筆數：{selected_count}")
+                        m = pd.DataFrame()
+                        # 路徑A：由 segment.source_order_id -> orders.id 映射 contract_id（最準）
                         if (
                             not selected_rows_df.empty
                             and "source_order_id" in selected_rows_df.columns
@@ -368,17 +370,39 @@ def render_table1_tab(
                             m = m.merge(od, left_on="source_order_id", right_on="id", how="left", suffixes=("", "_ord"))
                             m["contract_id"] = m["contract_id"].astype(str).str.strip()
                             m = m[m["contract_id"] != ""]
+                            ragic_report_lines.append("合約映射來源：source_order_id -> orders.id")
+
+                        # 路徑B：若 A 失敗，改用編輯表中已帶出的「合約編號」欄位 fallback
+                        if m.empty and "segment_id" in df_for_edit.columns and "合約編號" in df_for_edit.columns:
+                            m2 = df_for_edit[df_for_edit["segment_id"].astype(str).isin(seg_id_selected_list)].copy()
+                            m2["contract_id"] = m2["合約編號"].astype(str).str.strip()
+                            m2 = m2[m2["contract_id"] != ""]
+                            if not m2.empty:
+                                m = m2
+                                ragic_report_lines.append("合約映射來源：編輯表合約編號（fallback）")
+
+                        # 路徑C：再退一步，若 segments 內已有 contract_id 欄位也可直接使用
+                        if m.empty and "contract_id" in selected_rows_df.columns:
+                            m3 = selected_rows_df.copy()
+                            m3["contract_id"] = m3["contract_id"].astype(str).str.strip()
+                            m3 = m3[m3["contract_id"] != ""]
+                            if not m3.empty:
+                                m = m3
+                                ragic_report_lines.append("合約映射來源：segments.contract_id（fallback）")
+
+                        if not m.empty:
                             ragic_report_lines.append(f"可映射合約筆數：{len(m)}")
+                            start_col = "start_date" if "start_date" in m.columns else None
+                            end_col = "end_date" if "end_date" in m.columns else None
                             for cid, g in m.groupby("contract_id"):
+                                date_range = ""
+                                if start_col and end_col:
+                                    date_range = f"；範圍={str(g[start_col].min())}~{str(g[end_col].max())}"
                                 notes_by_contract[str(cid)] = [
-                                    (
-                                        f"- seconds_type 更新為「{new_seconds_type}」；"
-                                        f"更新段數={len(g)}；"
-                                        f"範圍={str(g['start_date'].min())}~{str(g['end_date'].max())}"
-                                    )
+                                    f"- seconds_type 更新為「{new_seconds_type}」；更新段數={len(g)}{date_range}"
                                 ]
                         else:
-                            ragic_report_lines.append("無法建立合約映射（缺少 source_order_id / orders.id / orders.contract_id）。")
+                            ragic_report_lines.append("無法建立合約映射（A:source_order_id, B:合約編號, C:segments.contract_id 皆不可用）。")
 
                         ragic_report_lines.append(f"可回寫合約數：{len(notes_by_contract)}")
                         if notes_by_contract:
