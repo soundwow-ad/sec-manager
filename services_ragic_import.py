@@ -384,6 +384,25 @@ def _extract_segments_seconds_type_blocks(note_text: str) -> list[str]:
     return blocks
 
 
+def _extract_latest_seconds_type_from_note(note_text: str) -> str:
+    """
+    從「秒數管理(備註)」中擷取最後一次 Segments 更新紀錄的 seconds_type。
+    匹配格式：- seconds_type 更新為「銷售秒數」；...
+    """
+    txt = str(note_text or "")
+    if not txt:
+        return ""
+    try:
+        import re
+
+        matches = re.findall(r"seconds_type\s*更新為[「\"]([^」\"\n]+)[」\"]", txt)
+        if matches:
+            return str(matches[-1]).strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def _push_seconds_mgmt_to_ragic(
     *,
     ref,
@@ -476,6 +495,14 @@ def _ragic_entry_collect_order_rows(
         or entry.get("seconds_type")
         or ""
     ).strip()
+    # 若主欄位未填，回退使用「秒數管理(備註)」最後一次更新紀錄，避免再次匯入時遺失用途。
+    if not ragic_seconds_type:
+        note_text = str(
+            _ragic_get_field(entry, "秒數管理(備註)", ragic_fields)
+            or entry.get("秒數管理(備註)")
+            or ""
+        )
+        ragic_seconds_type = _extract_latest_seconds_type_from_note(note_text)
     project_amount = _ragic_extract_project_amount(entry)
 
     state: dict = {
@@ -712,7 +739,7 @@ def _ragic_entry_collect_order_rows(
                 "加發獎金": str(_ragic_get_field(entry, "加發獎金", ragic_fields) or ""),
                 "業務基金": str(_ragic_get_field(entry, "業務基金", ragic_fields) or ""),
                 "協力基金": str(_ragic_get_field(entry, "協力基金", ragic_fields) or ""),
-                "秒數用途": "",
+                "秒數用途": ragic_seconds_type,
                 "提交日": str(_ragic_get_field(entry, "建立日期", ragic_fields) or ""),
                 "HYUNDAI_CUSTIN": str(_ragic_get_field(entry, "客戶", ragic_fields) or ""),
                 "秒數": seconds,
