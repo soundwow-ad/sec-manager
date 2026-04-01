@@ -408,7 +408,18 @@ def render_table1_tab(
                                 notes_by_contract=notes_by_contract,
                             )
                             ragic_report_lines.extend([str(x) for x in ragic_msgs])
-                            failed_msgs = [m for m in ragic_msgs if ("失敗" in str(m) or "找不到" in str(m))]
+                            # 只把真正錯誤列為異常，避免把摘要中的「失敗 0」誤判成失敗。
+                            failed_msgs = [
+                                m
+                                for m in ragic_msgs
+                                if (
+                                    "回寫失敗" in str(m)
+                                    or "找不到可回寫" in str(m)
+                                    or "抓取 Ragic 清單失敗" in str(m)
+                                    or "未提供 Ragic URL/API Key" in str(m)
+                                    or "未設定「秒數管理(備註)」" in str(m)
+                                )
+                            ]
                             if touched > 0 and not failed_msgs:
                                 st.session_state["_ragic_upload_feedback"] = {
                                     "level": "success",
