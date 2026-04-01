@@ -182,6 +182,11 @@ def get_sheets_url() -> str | None:
     return f"https://docs.google.com/spreadsheets/d/{sid}/edit#gid=0"
 
 
+def get_effective_sheet_id() -> str | None:
+    """回傳目前設定實際使用的 sheet_id（供 UI 診斷）。"""
+    return _get_sheet_id()
+
+
 def _get_sheet_id() -> str | None:
     config = _get_sheet_config()
     sid = config.get("sheet_id") or config.get("sheet_id_")
@@ -833,6 +838,29 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True) -> list[str]:
     if errors and reason:
         errors.insert(0, reason)
     return errors
+
+
+def run_sheets_healthcheck() -> tuple[bool, str]:
+    """
+    Google Sheet 連線與寫入健康檢查。
+    會在 _HealthCheck 工作表寫入/回讀 A1，成功回傳 (True, message)。
+    """
+    try:
+        sh = _client()
+        if not sh:
+            return False, get_last_client_error() or "無法連線 Google Sheet"
+        try:
+            ws = sh.worksheet("_HealthCheck")
+        except Exception:
+            ws = sh.add_worksheet(title="_HealthCheck", rows=20, cols=5)
+        payload = f"ok:{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ws.update("A1", [[payload]], value_input_option="USER_ENTERED")
+        read_back = ws.acell("A1").value
+        if str(read_back or "").strip() != payload:
+            return False, f"回讀不一致：寫入={payload}，讀取={read_back}"
+        return True, f"健康檢查成功（A1={payload}）"
+    except Exception as e:
+        return False, str(e)
 
 
 def load_all_from_sheets_into_db(get_db_connection, init_db) -> list[str]:

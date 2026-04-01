@@ -22,6 +22,36 @@ def render_sidebar_admin(
     sync_sheets_if_enabled: Callable[..., object],
 ) -> None:
     st.sidebar.markdown("---")
+    with st.sidebar.expander("🔎 Google Sheet 連線診斷", expanded=False):
+        try:
+            from sheets_backend import (
+                get_sheets_status,
+                get_sheets_url,
+                get_effective_sheet_id,
+                run_sheets_healthcheck,
+            )
+
+            status, reason = get_sheets_status()
+            sid = get_effective_sheet_id() or "(未設定)"
+            st.caption(f"sheet_id: `{sid}`")
+            url = get_sheets_url()
+            if url:
+                st.caption(f"[開啟目前連線試算表]({url})")
+            if status == "ok":
+                st.success("狀態：已啟用")
+            else:
+                st.error("狀態：未啟用")
+                if reason:
+                    st.caption(f"原因：{reason}")
+            if st.button("執行寫入/回讀健康檢查", key="btn_sheets_healthcheck"):
+                ok, msg = run_sheets_healthcheck()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error("健康檢查失敗：" + msg)
+        except Exception as e:
+            st.error(f"診斷模組載入失敗：{e}")
+
     if st.sidebar.button("🧨 重置資料庫（清空資料，保留 Users）", help="⚠️ 警告：會清空主要業務資料，保留帳號權限"):
         try:
             # 改為直接清空資料表，避免依賴 db 檔路徑導致「看似重置、實際未清空」。
