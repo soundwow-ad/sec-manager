@@ -493,6 +493,8 @@ def update_source_sheet_seconds_type(
     回寫「匯入來源表」的秒數用途。
     updates 每筆需包含：
       platform, company, sales, client, product, start_date, end_date, seconds, spots, seconds_type
+    可選：
+      region, contract_id（若來源表有這兩欄會一併納入精準匹配）
     回傳錯誤列表；空表示成功。
     """
     errors: list[str] = []
@@ -538,6 +540,9 @@ def update_source_sheet_seconds_type(
                     continue
                 return [f"來源表缺少欄位：{h}"]
             col_idx[k] = header.index(h)
+        # 可選精準匹配欄位（存在才使用）
+        opt_col_region = header.index("區域") if "區域" in header else None
+        opt_col_contract = header.index("合約編號") if "合約編號" in header else None
 
         # 建立待更新鍵值（同一鍵可對多列，全部更新）
         update_map: dict[tuple, str] = {}
@@ -552,6 +557,8 @@ def update_source_sheet_seconds_type(
                 _norm_date_text(u.get("end_date", "")),
                 str(int(float(u.get("seconds", 0) or 0))),
                 str(int(float(u.get("spots", 0) or 0))),
+                (str(u.get("region", "")).strip() if opt_col_region is not None else ""),
+                (str(u.get("contract_id", "")).strip() if opt_col_contract is not None else ""),
             )
             update_map[key] = str(u.get("seconds_type", "") or "")
 
@@ -569,6 +576,16 @@ def update_source_sheet_seconds_type(
                 _norm_date_text(row[col_idx["end_date"]]) if len(row) > col_idx["end_date"] else "",
                 str(int(float((row[col_idx["seconds"]] if len(row) > col_idx["seconds"] else "0") or 0))),
                 str(int(float((row[col_idx["spots"]] if len(row) > col_idx["spots"] else "0") or 0))),
+                (
+                    str(row[opt_col_region]).strip()
+                    if opt_col_region is not None and len(row) > opt_col_region
+                    else ""
+                ),
+                (
+                    str(row[opt_col_contract]).strip()
+                    if opt_col_contract is not None and len(row) > opt_col_contract
+                    else ""
+                ),
             )
             if key in update_map:
                 a1 = f"{_col_to_a1(col_idx['seconds_type'] + 1)}{ridx + 1}"

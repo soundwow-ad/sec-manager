@@ -425,6 +425,8 @@ def render_table1_tab(
                                                 "end_date": r.get("end_date", ""),
                                                 "seconds": r.get("seconds", 0),
                                                 "spots": r.get("spots", 0),
+                                                "region": r.get("region", ""),
+                                                "contract_id": r.get("contract_id", ""),
                                                 "seconds_type": new_seconds_type,
                                             }
                                         )
