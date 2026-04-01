@@ -43,22 +43,16 @@ def render_sidebar_admin(
             st.sidebar.success("✅ 已清空資料庫資料（Users 保留）")
 
             # 同步到 Google Sheet：只清空非 Users 工作表
-            try:
-                from sheets_backend import is_sheets_enabled, clear_business_tables_in_sheets
+            from sheets_backend import is_sheets_enabled, clear_business_tables_in_sheets
 
-                if not is_sheets_enabled():
-                    st.sidebar.warning("Google Sheet 未啟用或未設定：跳過同步。")
-                    st.session_state["_sheets_restored"] = True
-                    time.sleep(1)
-                    st.rerun()
-                # 優先直接清空 Sheet（不依賴 DB 同步），確保畫面可立即清空
-                direct_clear_errs = clear_business_tables_in_sheets(keep_users=True)
-                if direct_clear_errs:
-                    st.sidebar.error("Google Sheet 直接清空失敗：" + "; ".join(direct_clear_errs[:5]))
-                    return
-            except Exception:
-                # is_sheets_enabled 失敗但同步可能仍可用，仍繼續嘗試同步
-                pass
+            if not is_sheets_enabled():
+                st.sidebar.error("Google Sheet 未啟用或設定不完整：此次不會顯示清空成功。")
+                return
+            # 優先直接清空 Sheet（不依賴 DB 同步），確保畫面可立即清空
+            direct_clear_errs = clear_business_tables_in_sheets(keep_users=True)
+            if direct_clear_errs:
+                st.sidebar.error("Google Sheet 直接清空失敗：" + "; ".join(direct_clear_errs[:5]))
+                return
 
             # 後備：再做一次 DB->Sheet 同步，避免欄位差異造成不一致
             errs = sync_sheets_if_enabled(

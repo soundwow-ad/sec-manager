@@ -810,6 +810,25 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True) -> list[str]:
         except Exception as e:
             errors.append(f"{name}: {e}")
 
+    # 回讀驗證：若仍有非空資料列，視為清空失敗（避免 UI 顯示假成功）
+    try:
+        sh = _client()
+        if not sh:
+            errors.append("驗證失敗：無法連線 Google Sheet")
+        else:
+            for name, _, _ in table_jobs:
+                try:
+                    ws = sh.worksheet(name)
+                    values = ws.get_all_values() or []
+                    body_rows = values[1:] if len(values) > 1 else []
+                    has_non_empty = any(any(str(cell).strip() for cell in row) for row in body_rows)
+                    if has_non_empty:
+                        errors.append(f"{name}: 驗證未通過（仍有資料列）")
+                except Exception as e:
+                    errors.append(f"{name}: 驗證讀取失敗: {e}")
+    except Exception as e:
+        errors.append(f"驗證例外: {e}")
+
     reason = get_last_client_error()
     if errors and reason:
         errors.insert(0, reason)
