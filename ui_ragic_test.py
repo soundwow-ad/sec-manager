@@ -123,9 +123,26 @@ def _ensure_seconds_mgmt_rows(
     existed_ids = {str(r.get("欄位ID", "")).strip() for r in out}
     existed_names = {str(r.get("欄位名稱", "")).strip() for r in out}
 
+    def _latest_seconds_type_from_note() -> str:
+        note_text = _normalize_cell(
+            _get_ragic_value_by_keys(
+                entry,
+                str(ragic_fields.get("秒數管理(備註)", "") or "").strip(),
+                "秒數管理(備註)",
+            )
+        )
+        if not note_text:
+            return ""
+        m = re.findall(r"seconds_type\s*更新為[「\"]([^」\"\n]+)[」\"]", note_text)
+        return str(m[-1]).strip() if m else ""
+
+    latest_from_note = _latest_seconds_type_from_note()
+
     def add_if_missing(field_name: str) -> None:
         fid = str(ragic_fields.get(field_name, "") or "").strip()
         val = _normalize_cell(_get_ragic_value_by_keys(entry, fid, field_name))
+        if field_name == "秒數用途" and (not val) and latest_from_note:
+            val = latest_from_note
         # 允許空值列出，避免使用者誤判「沒有這欄」
         id_key = fid or field_name
         if id_key in existed_ids or field_name in existed_names:
@@ -325,6 +342,24 @@ def _entry_to_table1_ragic_overrides(entry: dict, ragic_fields: dict[str, str]) 
         if pct is not None and pct != "":
             overrides["獎金%"] = _normalize_cell(pct)
             break
+
+    # 秒數用途：優先主欄位；若主欄位空白，回退解析秒數管理(備註)最新紀錄
+    stype = _normalize_cell(
+        _get_ragic_value_by_keys(
+            entry,
+            ragic_fields.get("秒數用途", ""),
+            "秒數用途",
+            "seconds_type",
+        )
+    )
+    if not stype:
+        note_text = _normalize_cell(_get_ragic_value_by_keys(entry, ragic_fields.get("秒數管理(備註)", ""), "秒數管理(備註)"))
+        if note_text:
+            ms = re.findall(r"seconds_type\s*更新為[「\"]([^」\"\n]+)[」\"]", note_text)
+            if ms:
+                stype = str(ms[-1]).strip()
+    if stype:
+        overrides["秒數用途"] = stype
 
     return overrides
 
@@ -794,7 +829,7 @@ def render_ragic_test_tab(
                         "業務基金": PLACEHOLDER_MISSING,
                         "協力基金": PLACEHOLDER_MISSING,
                         # 無法可靠判斷秒數用途時，維持空值（避免硬推銷售秒數）
-                        "秒數用途": "",
+                        "秒數用途": ragic_overrides.get("秒數用途", ""),
                         "提交日": ragic_overrides.get("提交日") or PLACEHOLDER_MISSING,
                         "HYUNDAI_CUSTIN": order_info.get("client") or PLACEHOLDER_NOT_AVAILABLE,
                         "秒數": sec,
