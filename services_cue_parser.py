@@ -26,8 +26,10 @@ def _parse_cueapp_period_dongwu(row_b5_value):
     return None, None
 
 
-def _parse_cueapp_period_shenghuo_bolin(df, search_rows=(3, 4, 5)):
-    """從聲活/鉑霖格式中找「執行期間：YYYY.MM.DD - YYYY.MM.DD」"""
+def _parse_cueapp_period_shenghuo_bolin(df, search_rows=None):
+    """從聲活/鉑霖格式中找「執行期間：YYYY.MM.DD - YYYY.MM.DD」（V2 可能上移／下移，多列掃描）"""
+    if search_rows is None:
+        search_rows = range(0, min(28, len(df)))
     for ri in search_rows:
         if ri >= len(df):
             continue
@@ -41,6 +43,60 @@ def _parse_cueapp_period_shenghuo_bolin(df, search_rows=(3, 4, 5)):
             except (ValueError, TypeError):
                 pass
     return None, None
+
+
+def _cueapp_top_block_text(df: pd.DataFrame, max_rows: int = 14) -> str:
+    """合併表頭區多列文字，辨識公司名／版型（避免 V2 首列空白或標題下移）。"""
+    parts = []
+    for ri in range(min(max_rows, len(df))):
+        try:
+            parts.append(df.iloc[ri].fillna("").astype(str).str.cat(sep=" "))
+        except Exception:
+            continue
+    return " ".join(parts)
+
+
+def _row_text_df(df: pd.DataFrame, i: int) -> str:
+    try:
+        return df.iloc[i].fillna("").astype(str).str.cat(sep=" ")
+    except Exception:
+        return ""
+
+
+def _find_cueapp_schedule_header_row(df: pd.DataFrame) -> int | None:
+    """
+    找出「頻道／播出／秒數」表頭列。鉑霖 V2 可能用「播出區域」、或表頭較下方。
+    """
+    for i in range(min(50, len(df))):
+        t = _row_text_df(df, i)
+        if not t or len(t.strip()) < 4:
+            continue
+        has_sec = (
+            "秒數" in t
+            or "Size" in t
+            or ("size" in t.lower() and "station" in t.lower())
+            or "秒數規格" in t.replace("\n", "")
+        )
+        # 完整中文（對齊 Excel Renderer：頻道、播出地區、播出店數、秒數\n規格）
+        ch_sched = (
+            "頻道" in t
+            and has_sec
+            and (
+                "播出地區" in t
+                or "播出區域" in t
+                or "播出店數" in t
+                or ("播出" in t and "地區" in t)
+                or ("播出" in t and "區域" in t)
+            )
+        )
+        # 東吳：Station, Location, Size（與 generate Excel 列 7 英文表頭一致；Program/Day-part 可選）
+        en_sched = "Station" in t and "Location" in t and ("Size" in t or "秒數" in t)
+        # 鬆綁：同列已有頻道+秒數（部分版型地區欄位名稱不同）
+        ch_loose = "頻道" in t and "秒數" in t
+        en_loose = ("Station" in t or "Channel" in t) and ("Size" in t or "秒數" in t)
+        if ch_sched or en_sched or ch_loose or en_loose:
+            return i
+    return None
 
 
 def _cell_val(v):
@@ -90,14 +146,21 @@ def parse_cueapp_excel(file_content):
             df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None, engine="openpyxl")
             if df.empty or len(df) < 9:
                 continue
-            row0_text = df.iloc[0].fillna("").astype(str).str.cat(sep=" ")
+            top_block = _cueapp_top_block_text(df, max_rows=14)
+            row0_text = _row_text_df(df, 0)
             fmt = None
-            if "Media Schedule" in row0_text or (len(df.columns) > 0 and str(df.iloc[0, 0]).strip() == "Media Schedule"):
-                fmt = "dongwu"
-            elif "聲活數位" in row0_text:
+            # 順序重要：鉑霖標題含「Mobi Media Schedule」，不可先判成東吳 Media Schedule
+            if "聲活數位" in top_block:
                 fmt = "shenghuo"
-            elif "鉑霖行動行銷" in row0_text or "鉑霖" in row0_text:
+            elif (
+                "鉑霖行動行銷" in top_block
+                or "Mobi Media Schedule" in top_block
+                or ("鉑霖" in top_block and "排程表" in top_block)
+                or ("鉑霖" in top_block and "媒體計劃" in top_block)
+            ):
                 fmt = "bolin"
+            elif "Media Schedule" in top_block or (len(df.columns) > 0 and str(df.iloc[0, 0]).strip() == "Media Schedule"):
+                fmt = "dongwu"
 
             if fmt is None:
                 if re.match(r"^\d+月$", str(sheet_name).strip()):
@@ -112,19 +175,6 @@ def parse_cueapp_excel(file_content):
             date_start_col = None
             eff_days = None
             header_row_idx = None
-
-            def _find_schedule_header_row(_df: pd.DataFrame):
-                def _row_text(i: int) -> str:
-                    try:
-                        return _df.iloc[i].fillna("").astype(str).str.cat(sep=" ")
-                    except Exception:
-                        return ""
-
-                for i in range(min(40, len(_df))):
-                    t = _row_text(i)
-                    if ("頻道" in t and "播出地區" in t and "秒數" in t) or ("Station" in t and "Location" in t and ("Size" in t or "秒數" in t)):
-                        return i
-                return None
 
             def _parse_day_cell(v):
                 v = _cell_val(v)
@@ -206,7 +256,7 @@ def parse_cueapp_excel(file_content):
                     if eff_days is None:
                         eff_days = max(0, df.shape[1] - date_start_col - 1)
                 else:
-                    header_row_idx = _find_schedule_header_row(df)
+                    header_row_idx = _find_cueapp_schedule_header_row(df)
                     if header_row_idx is None:
                         continue
                     sec_col = None
@@ -217,7 +267,12 @@ def parse_cueapp_excel(file_content):
                             break
                     if sec_col is None:
                         continue
-                    date_start_col = sec_col + 1
+                    hdr_join = _row_text_df(df, header_row_idx)
+                    # 東吳英文表固定 A~G（0~6）為 Station…Package-cost，日期自第 8 欄（index 7）起
+                    if "Station" in hdr_join and "Location" in hdr_join:
+                        date_start_col = 7
+                    else:
+                        date_start_col = sec_col + 1
                     day_cols = []
                     for j in range(date_start_col, min(df.shape[1], date_start_col + 80)):
                         d = _parse_day_cell(df.iloc[header_row_idx, j])
@@ -254,7 +309,7 @@ def parse_cueapp_excel(file_content):
                     end_date = max(dates2)
             else:
                 start_date, end_date = _parse_cueapp_period_shenghuo_bolin(df)
-                header_row_idx = _find_schedule_header_row(df)
+                header_row_idx = _find_cueapp_schedule_header_row(df)
                 if header_row_idx is None:
                     continue
                 sec_col = None
@@ -354,7 +409,8 @@ def parse_cueapp_excel(file_content):
                     date_list = date_list[:eff_days]
                 dates_str = [d.strftime("%Y-%m-%d") for d in date_list]
 
-            data_start_row = header_row_idx + 1
+            # 與 Excel Renderer 一致：頻道／Station 與「日期列」佔兩列合併列，資料自表頭第一列 +2 列開始
+            data_start_row = header_row_idx + 2
             platform_info = _extract_platform_from_sheet(df, sheet_name)
             seconds_info = _extract_seconds_from_sheet(df, sheet_name)
             default_seconds = seconds_info.get("seconds", 0)
