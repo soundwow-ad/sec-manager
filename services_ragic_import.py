@@ -1376,7 +1376,21 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
             break
 
     touched = 0
+    failed = 0
     now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    matched_contracts: set[str] = set()
+    matched_entries = 0
+
+    contract_to_entries: dict[str, list[dict]] = {}
+    for entry in all_entries:
+        cid = str(_ragic_get_field(entry, "訂檔單號", ragic_fields) or "").strip()
+        if cid:
+            contract_to_entries.setdefault(cid, []).append(entry)
+
+    missing_contracts = sorted([c for c in contracts if c not in contract_to_entries])
+    for cid in missing_contracts:
+        msgs.append(f"合約 {cid}：在 Ragic 清單中找不到可回寫的記錄。")
+
     for entry in all_entries:
         rid = str(entry.get("_ragicId") or "").strip()
         if not rid:
@@ -1384,6 +1398,8 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
         contract_id = str(_ragic_get_field(entry, "訂檔單號", ragic_fields) or "").strip()
         if contract_id not in contracts:
             continue
+        matched_contracts.add(contract_id)
+        matched_entries += 1
         old_note = str(_ragic_get_field(entry, "秒數管理(備註)", ragic_fields) or "")
         lines = [str(x) for x in (notes_by_contract.get(contract_id) or []) if str(x).strip()]
         if not lines:
@@ -1403,6 +1419,12 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
             touched += 1
             msgs.append(f"RagicId {rid} 已附加 seconds_type 更新紀錄。")
         else:
+            failed += 1
             msgs.append(f"RagicId {rid} 回寫失敗：{err}")
+    summary = (
+        f"回寫摘要：目標合約 {len(contracts)}、命中合約 {len(matched_contracts)}、"
+        f"命中記錄 {matched_entries}、成功 {touched}、失敗 {failed}、未命中合約 {len(missing_contracts)}"
+    )
+    msgs.insert(0, summary)
     return touched, msgs
 

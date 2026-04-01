@@ -381,10 +381,16 @@ def render_table1_tab(
                                 ragic_fields=RAGIC_FIELDS,
                                 notes_by_contract=notes_by_contract,
                             )
-                            if touched > 0:
-                                st.caption(f"✅ 已附加回寫 Ragic 秒數管理備註：{touched} 筆")
+                            failed_msgs = [m for m in ragic_msgs if ("失敗" in str(m) or "找不到" in str(m))]
+                            if touched > 0 and not failed_msgs:
+                                st.success(f"Ragic 秒數用途回寫成功：{touched} 筆")
+                            elif touched > 0:
+                                st.warning(f"Ragic 秒數用途回寫部分成功：成功 {touched}，異常 {len(failed_msgs)}")
                             else:
-                                st.caption("ℹ️ Ragic 備註回寫結果：" + ("；".join(ragic_msgs[:2]) if ragic_msgs else "未找到可回寫目標"))
+                                st.error("Ragic 秒數用途回寫未成功。")
+                            if ragic_msgs:
+                                with st.expander("查看 Ragic 上傳結果明細", expanded=True):
+                                    st.code("\n".join([str(x) for x in ragic_msgs]), language="text")
                     except Exception as e:
                         st.caption(f"ℹ️ Ragic 秒數管理備註回寫略過：{e}")
 
