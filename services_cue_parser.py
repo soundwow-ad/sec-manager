@@ -176,6 +176,49 @@ def _find_cueapp_sec_col(df: pd.DataFrame, header_row_idx: int, row_span: int = 
     return None
 
 
+def _find_first_day_column_streak(
+    df: pd.DataFrame, r: int, min_col: int = 2, max_col: int = 50
+) -> int | None:
+    """
+    在數字日期列上找第一組連續 >=3 欄的「1–31」起點 index。
+    用於與秒數欄幾何對齊，避免 _find_cueapp_sec_col 先命中表頭區較早的「15秒廣告」。
+    """
+    if r < 0 or r >= len(df):
+        return None
+    streak = 0
+    start_j: int | None = None
+    best_start: int | None = None
+    best_len = 0
+    for j in range(min_col, min(max_col, df.shape[1])):
+        if _parse_cueapp_day_header_cell(df.iloc[r, j]) is not None:
+            if streak == 0:
+                start_j = j
+            streak += 1
+        else:
+            if streak >= 3 and streak > best_len and start_j is not None:
+                best_len = streak
+                best_start = start_j
+            streak = 0
+            start_j = None
+    if streak >= 3 and streak > best_len and start_j is not None:
+        best_start = start_j
+    return best_start
+
+
+def _cue_header_seconds_like(df: pd.DataFrame, base_row: int, j: int, row_span: int = 2) -> bool:
+    """表頭鄰列該欄是否像秒數／規格（鬆匹配）。"""
+    if j < 0:
+        return False
+    for dr in range(row_span):
+        ri = base_row + dr
+        if ri >= len(df):
+            break
+        s = str(df.iloc[ri, j]).replace("\n", " ").strip().lower()
+        if "秒" in s or "size" in s or "規格" in s:
+            return True
+    return False
+
+
 _WEEKDAYS_CN = frozenset("一二三四五六日")
 
 
@@ -621,16 +664,31 @@ def parse_cueapp_excel(file_content, diagnostics_out: list | None = None):
                 if header_row_idx is None:
                     _diag("聲活／鉑霖：找不到排程表頭列（頻道、秒數線索、播出地區等）。")
                     continue
-                sec_col = _find_cueapp_sec_col(df, header_row_idx)
-                if sec_col is None:
+                sec_guess = _find_cueapp_sec_col(df, header_row_idx)
+                if sec_guess is None:
                     _diag("聲活／鉑霖：找不到秒數／Size 欄（含 15秒廣告 等形式）。")
                     continue
-                date_start_col = sec_col + 1
-                schedule_day_row, pick_notes = _pick_numeric_day_header_row(
-                    df, header_row_idx, date_start_col, None
-                )
+                # 自第 3 欄起掃「幾日」數字，避免誤用表頭上方「廣告規格／15秒」附近的欄位
+                schedule_day_row, pick_notes = _pick_numeric_day_header_row(df, header_row_idx, 3, None)
                 for note in pick_notes:
                     _diag(note)
+                first_day_j = _find_first_day_column_streak(df, schedule_day_row, min_col=2, max_col=min(55, df.shape[1]))
+                if first_day_j is not None:
+                    sec_col = first_day_j - 1
+                    date_start_col = first_day_j
+                    if not _cue_header_seconds_like(df, schedule_day_row, sec_col):
+                        _diag(
+                            f"欄位幾何：日期數字區起於欄索引 {first_day_j}（左鄰 {sec_col} 表頭未含秒數／規格關鍵字），"
+                            "仍採左鄰為秒數欄；若檔次仍為 0 請檢查合併格。"
+                        )
+                    elif sec_guess != sec_col:
+                        _diag(
+                            f"秒數欄校正：表頭先掃到索引 {sec_guess}，依「幾日」連續區左界改為 {sec_col}（避免誤用較早的 15 秒欄）。"
+                        )
+                else:
+                    sec_col = sec_guess
+                    date_start_col = sec_guess + 1
+                    _diag("未在數字日期列偵測到連續「幾日」區塊，退回初次秒數掃描決定日期起欄。")
                 flex_month = _infer_month_neighborhood(df, schedule_day_row)
                 if flex_month is not None:
                     _diag(f"月份提示：表頭鄰近掃到「{flex_month} 月」（與執行期間併用於拼日期）。")
