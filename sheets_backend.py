@@ -241,6 +241,28 @@ def _df_to_values(df: pd.DataFrame) -> list[list[Any]]:
     return [df.columns.tolist()] + df.astype(str).values.tolist()
 
 
+def _update_worksheet_with_clear_when_empty(ws, df: pd.DataFrame, fallback_header: list[str]) -> None:
+    """
+    寫入工作表；若 df 為空，仍會把既有資料列覆蓋清空，避免殘留舊資料。
+    """
+    if df is None or df.empty:
+        header = list(getattr(df, "columns", [])) if df is not None else list(fallback_header)
+        if not header:
+            header = list(fallback_header)
+        existing = ws.get_all_values() or []
+        if not existing:
+            ws.update([header] if header else [[""]], value_input_option="USER_ENTERED")
+            return
+        ncols = max(len(existing[0]), len(header))
+        header_padded = header + [""] * (ncols - len(header))
+        blank_row = [""] * ncols
+        new_values = [header_padded] + [blank_row] * (max(0, len(existing) - 1))
+        ws.update(new_values, value_input_option="USER_ENTERED")
+        return
+
+    ws.update(_df_to_values(df), value_input_option="USER_ENTERED")
+
+
 def _records_to_df(records: list[dict]) -> pd.DataFrame:
     if not records:
         return pd.DataFrame()
@@ -610,8 +632,7 @@ def write_platform_settings_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_PLATFORM_SETTINGS)
-        vals = _df_to_values(df)
-        ws.update(vals if vals else [["platform", "store_count", "daily_hours"]], value_input_option="USER_ENTERED")
+        _update_worksheet_with_clear_when_empty(ws, df, ["platform", "store_count", "daily_hours"])
         return None
     except Exception as e:
         return str(e)
@@ -624,8 +645,11 @@ def write_capacity_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_CAPACITY)
-        vals = _df_to_values(df)
-        ws.update(vals if vals else [["media_platform", "year", "month", "daily_available_seconds"]], value_input_option="USER_ENTERED")
+        _update_worksheet_with_clear_when_empty(
+            ws,
+            df,
+            ["media_platform", "year", "month", "daily_available_seconds"],
+        )
         return None
     except Exception as e:
         return str(e)
@@ -638,8 +662,11 @@ def write_purchase_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_PURCHASE)
-        vals = _df_to_values(df)
-        ws.update(vals if vals else [["media_platform", "year", "month", "purchased_seconds", "purchase_price"]], value_input_option="USER_ENTERED")
+        _update_worksheet_with_clear_when_empty(
+            ws,
+            df,
+            ["media_platform", "year", "month", "purchased_seconds", "purchase_price"],
+        )
         return None
     except Exception as e:
         return str(e)
@@ -652,8 +679,11 @@ def write_users_to_sheets(df: pd.DataFrame) -> str | None:
             return "未設定或未啟用 Google Sheet"
         _ensure_worksheets(sh)
         ws = sh.worksheet(WS_USERS)
-        vals = _df_to_values(df)
-        ws.update(vals if vals else [["id", "username", "password_hash", "role", "created_at"]], value_input_option="USER_ENTERED")
+        _update_worksheet_with_clear_when_empty(
+            ws,
+            df,
+            ["id", "username", "password_hash", "role", "created_at"],
+        )
         return None
     except Exception as e:
         return str(e)
