@@ -12,6 +12,9 @@ def parse_platform_region(raw_platform):
     raw_platform = str(raw_platform)
     if "宜花束" in raw_platform:
         raw_platform = raw_platform.replace("宜花束", "宜花東")
+    # 同義字正規化：部分檔案用「高屏」，系統區域主鍵用「高高屏」
+    if "高高屏" not in raw_platform and "高屏" in raw_platform:
+        raw_platform = raw_platform.replace("高屏", "高高屏")
     if "新鮮視" in raw_platform:
         platform = "全家"
         channel = "新鮮視"
