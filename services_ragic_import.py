@@ -312,6 +312,12 @@ def _compose_seconds_mgmt_remark(*, state: dict, batch_id: str, seconds_type_not
         lines.append("【已寫入本系統 orders 的檔次摘要】")
         lines.extend(state["imported_summaries"])
         lines.append("")
+    if state.get("uploaded_rows_detail"):
+        lines.append("【已通過入庫條件列（完整欄位快照）】")
+        lines.extend(state["uploaded_rows_detail"][:200])
+        if len(state["uploaded_rows_detail"]) > 200:
+            lines.append(f"... 其餘 {len(state['uploaded_rows_detail']) - 200} 列略")
+        lines.append("")
     if state.get("skipped_summaries"):
         lines.append("【解析到但未入庫的列（疑慮／條件不符）】")
         lines.extend(state["skipped_summaries"])
@@ -429,6 +435,7 @@ def _ragic_entry_collect_order_rows(
         "issues": [],
         "file_logs": [],
         "imported_summaries": [],
+        "uploaded_rows_detail": [],
         "skipped_summaries": [],
         "seconds_type_notes": [],
         "cue_excel_layout_sections": [],
@@ -632,6 +639,39 @@ def _ragic_entry_collect_order_rows(
                     ),
                 )
             )
+            detail_row = {
+                "業務": order_info.get("sales", ""),
+                "主管": str(_ragic_get_field(entry, "主管", ragic_fields) or ""),
+                "合約編號": str(order_no),
+                "公司": order_info.get("company", ""),
+                "實收金額": project_amount if project_amount and project_amount > 0 else "",
+                "除佣實收": project_amount if project_amount and project_amount > 0 else "",
+                "專案實收金額": project_amount if project_amount and project_amount > 0 else "",
+                "拆分金額": "待拆分計算",
+                "製作成本": str(_ragic_get_field(entry, "製作成本", ragic_fields) or ""),
+                "獎金%": str(_ragic_get_field(entry, "獎金%", ragic_fields) or ""),
+                "核定獎金": str(_ragic_get_field(entry, "核定獎金", ragic_fields) or ""),
+                "加發獎金": str(_ragic_get_field(entry, "加發獎金", ragic_fields) or ""),
+                "業務基金": str(_ragic_get_field(entry, "業務基金", ragic_fields) or ""),
+                "協力基金": str(_ragic_get_field(entry, "協力基金", ragic_fields) or ""),
+                "秒數用途": "",
+                "提交日": str(_ragic_get_field(entry, "建立日期", ragic_fields) or ""),
+                "HYUNDAI_CUSTIN": str(_ragic_get_field(entry, "客戶", ragic_fields) or ""),
+                "秒數": seconds,
+                "素材": str(u.get("ad_name") or ""),
+                "起始日": start_date_norm,
+                "終止日": end_date_norm,
+                "走期天數": days,
+                "區域": str(u.get("region") or ""),
+                "媒體平台": platform,
+            }
+            col_order = [
+                "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
+                "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
+                "HYUNDAI_CUSTIN", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
+            ]
+            row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
+            state["uploaded_rows_detail"].append(f"檔#{file_i} unit#{i + 1} | {row_text}")
             state["imported_summaries"].append(
                 f"order_id={order_id} | 平台={platform} | {seconds}秒 | 代表檔次≈{spots}/日 | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
             )
