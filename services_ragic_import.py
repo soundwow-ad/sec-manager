@@ -980,6 +980,12 @@ def import_ragic_to_orders_by_date_range_service(
             summary_lines.append(
                 f"  RagicId={rid} | id={t[0]} | 平台={t[1]} | 秒數={t[8]} | 檔次={t[9]} | 走期={t[6]}~{t[7]} | contract_id={t[12]}"
             )
+        if state.get("uploaded_rows_detail"):
+            summary_lines.append("")
+            summary_lines.append("【上傳至 orders 的完整欄位快照（每筆）】")
+            summary_lines.extend(state["uploaded_rows_detail"][:200])
+            if len(state["uploaded_rows_detail"]) > 200:
+                summary_lines.append(f"... 其餘 {len(state['uploaded_rows_detail']) - 200} 列略")
         summary_lines.append("")
         detail_report = "\n".join(summary_lines) + push_detail
         return (
@@ -1247,6 +1253,12 @@ def import_ragic_single_entry_to_orders_service(
             summary_lines.append(
                 f"  RagicId={rid} | id={t[0]} | 平台={t[1]} | 秒數={t[8]} | 檔次={t[9]} | 走期={t[6]}~{t[7]} | contract_id={t[12]}"
             )
+        if state.get("uploaded_rows_detail"):
+            summary_lines.append("")
+            summary_lines.append("【上傳至 orders 的完整欄位快照（每筆）】")
+            summary_lines.extend(state["uploaded_rows_detail"][:200])
+            if len(state["uploaded_rows_detail"]) > 200:
+                summary_lines.append(f"... 其餘 {len(state['uploaded_rows_detail']) - 200} 列略")
         summary_lines.append("")
         detail_report = "\n".join(summary_lines) + push_detail
         return (
