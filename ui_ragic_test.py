@@ -112,6 +112,33 @@ def _flatten_entry(entry: dict, rev_id_to_name: dict[str, str]) -> list[dict]:
     return rows
 
 
+def _ensure_seconds_mgmt_rows(
+    rows: list[dict],
+    *,
+    entry: dict,
+    ragic_fields: dict[str, str],
+) -> list[dict]:
+    """強制補上秒數管理相關欄位（即使原始回傳未攤平到也要顯示）。"""
+    out = list(rows or [])
+    existed_ids = {str(r.get("欄位ID", "")).strip() for r in out}
+    existed_names = {str(r.get("欄位名稱", "")).strip() for r in out}
+
+    def add_if_missing(field_name: str) -> None:
+        fid = str(ragic_fields.get(field_name, "") or "").strip()
+        val = _normalize_cell(_get_ragic_value_by_keys(entry, fid, field_name))
+        # 允許空值列出，避免使用者誤判「沒有這欄」
+        id_key = fid or field_name
+        if id_key in existed_ids or field_name in existed_names:
+            return
+        out.append({"欄位ID": id_key, "欄位名稱": field_name, "值": val if val else "（空白）"})
+        existed_ids.add(id_key)
+        existed_names.add(field_name)
+
+    for name in ("秒數管理", "秒數管理(備註)", "秒數用途"):
+        add_if_missing(name)
+    return out
+
+
 def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
     """從 Ragic entry 抽出 parse_cue_excel_for_table1 用的 order_info。"""
     def g(name: str) -> str:
@@ -684,6 +711,7 @@ def render_ragic_test_tab(
     # 一、Ragic 完整欄位（超詳盡）
     st.markdown("##### 一、Ragic 完整欄位（所有抓到的欄位）")
     ragic_rows = _flatten_entry(entry, rev_id_to_name)
+    ragic_rows = _ensure_seconds_mgmt_rows(ragic_rows, entry=entry, ragic_fields=ragic_fields)
     if ragic_rows:
         df_ragic = pd.DataFrame(ragic_rows)
         with st.expander("展開 Ragic 完整欄位表", expanded=True):
