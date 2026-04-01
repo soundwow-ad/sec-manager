@@ -12,8 +12,13 @@ import streamlit as st
 
 def render_sidebar_ragic_import(
     *,
-    import_ragic_to_orders_by_date_range: Callable[..., tuple[bool, str, str]],
+    import_ragic_to_orders_by_date_range: Callable[..., tuple[bool, str, str, str]],
 ) -> None:
+    pend = st.session_state.pop("_ragic_import_detail_pending", None)
+    if pend:
+        with st.sidebar.expander("上次 Ragic 區間匯入詳情", expanded=True):
+            st.text(pend)
+
     with st.sidebar.expander("📥 匯入 Ragic（日期區間）", expanded=False):
         st.caption("可依 Ragic 指定日期欄位篩選區間，匯入該期間所有可解析的 CUE Excel。")
         ragic_url_default = "https://ap13.ragic.com/soundwow/forms12/17"
@@ -59,7 +64,7 @@ def render_sidebar_ragic_import(
                 st.error("請輸入 Ragic API Key")
             else:
                 with st.spinner("正在從 Ragic 匯入資料（抓取、下載 Excel、解析、寫入）..."):
-                    ok, msg, batch_id = import_ragic_to_orders_by_date_range(
+                    ok, msg, batch_id, detail_report = import_ragic_to_orders_by_date_range(
                         ragic_url=ragic_import_url.strip(),
                         api_key=ragic_import_api_key.strip(),
                         date_from=ragic_date_from,
@@ -68,10 +73,15 @@ def render_sidebar_ragic_import(
                         replace_existing=False,
                     )
                     st.session_state["_ragic_last_batch_id"] = batch_id
+                    if detail_report and str(detail_report).strip():
+                        st.session_state["_ragic_import_detail_pending"] = detail_report
                     if ok:
                         st.success(msg)
                         time.sleep(0.3)
                         st.rerun()
                     else:
                         st.error(msg)
+                        if detail_report and str(detail_report).strip():
+                            with st.expander("匯入詳情（含寫入 Ragic 秒數管理／備註結果）", expanded=True):
+                                st.text(detail_report)
 

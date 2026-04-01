@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -53,6 +54,33 @@ def make_listing_url(ref: RagicSheetRef, *, limit: int, offset: int, subtables0:
 def make_single_record_url(ref: RagicSheetRef, record_id: str | int) -> str:
     base = f"https://{ref.host.strip().strip('/')}/{ref.account.strip().strip('/')}/{ref.tab_folder.strip().strip('/')}/{str(ref.sheet_index).strip().strip('/')}"
     return f"{base}/{str(record_id).strip()}?api&v=3"
+
+
+def post_update_entry_fields(
+    ref: RagicSheetRef,
+    record_id: str | int,
+    field_id_to_value: dict[str, str],
+    api_key: str,
+    *,
+    timeout: int = 90,
+) -> tuple[bool, str]:
+    """
+    以 JSON POST 更新單筆資料的指定欄位（欄位 key 為 Ragic 流水號字串）。
+    參考 Ragic API：Modifying an Entry。
+    """
+    if not field_id_to_value:
+        return True, "no fields to update"
+    url = make_single_record_url(ref, record_id)
+    try:
+        headers = {**auth_headers(api_key), "Content-Type": "application/json"}
+        body = {str(k): str(v) if v is not None else "" for k, v in field_id_to_value.items()}
+        r = requests.post(url, headers=headers, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=timeout)
+        text_snip = (r.text or "")[:800]
+        if r.status_code >= 400:
+            return False, f"http {r.status_code} {r.reason} body(head800)={text_snip}"
+        return True, text_snip or "ok"
+    except Exception as e:
+        return False, str(e)
 
 
 def get_json(url: str, api_key: str, *, timeout: int = 60) -> tuple[dict[str, Any] | None, str | None]:

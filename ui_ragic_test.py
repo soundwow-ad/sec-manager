@@ -518,6 +518,11 @@ def render_ragic_test_tab(
     st.markdown("### 🧪 Ragic 抓取資料測試")
     st.caption("搜尋單一案子（訂檔單號或 Ragic ID），檢視完整 Ragic 欄位、CUE 解析成表1、並下載 Excel / PDF。")
 
+    pend_single = st.session_state.pop("_ragic_single_import_detail_pending", None)
+    if pend_single:
+        with st.expander("上次單筆匯入詳情（Ragic 秒數管理回寫）", expanded=True):
+            st.text(pend_single)
+
     default_url = "https://ap13.ragic.com/soundwow/forms12/17"
     ragic_url = st.text_input("訂檔表單網址", value=default_url, help="Ragic 表單 URL")
     # 方便測試：若 secrets 沒配置，先帶入暫時預設 key（之後可再移除）
@@ -648,18 +653,23 @@ def render_ragic_test_tab(
                 st.error("請輸入 Ragic API Key。")
                 st.stop()
             with st.spinner("正在匯入（抓取附檔、解析 CUE、寫入 orders/segments）..."):
-                ok, msg, batch_id = import_ragic_single_entry_to_orders(
+                ok, msg, batch_id, detail_report = import_ragic_single_entry_to_orders(
                     ragic_url=ragic_url.strip(),
                     api_key=str(api_key_use).strip(),
                     ragic_id=rid,
                     replace_existing=False,
                 )
+            if detail_report and str(detail_report).strip():
+                st.session_state["_ragic_single_import_detail_pending"] = detail_report
             if ok:
                 st.success(msg)
                 st.session_state["_ragic_last_batch_id"] = batch_id
                 st.rerun()
             else:
                 st.error(msg)
+                if detail_report and str(detail_report).strip():
+                    with st.expander("匯入詳情（含寫入 Ragic 秒數管理／備註結果）", expanded=True):
+                        st.text(detail_report)
 
     # 一、Ragic 完整欄位（超詳盡）
     st.markdown("##### 一、Ragic 完整欄位（所有抓到的欄位）")
