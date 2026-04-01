@@ -468,6 +468,14 @@ def _ragic_entry_collect_order_rows(
         "order_id": str(order_no),
         "amount_net": 0,
     }
+    # Ragic 為秒數用途單一真實來源：匯入時直接採用此值。
+    ragic_seconds_type = str(
+        _ragic_get_field(entry, "秒數用途", ragic_fields)
+        or _ragic_get_field(entry, "seconds_type", ragic_fields)
+        or entry.get("秒數用途")
+        or entry.get("seconds_type")
+        or ""
+    ).strip()
     project_amount = _ragic_extract_project_amount(entry)
 
     state: dict = {
@@ -682,7 +690,7 @@ def _ragic_entry_collect_order_rows(
                         0,
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         str(order_no),
-                        "",
+                        ragic_seconds_type,
                         project_amount if project_amount and project_amount > 0 else None,
                         None,
                         region,
@@ -723,7 +731,7 @@ def _ragic_entry_collect_order_rows(
             row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
             state["uploaded_rows_detail"].append(f"檔#{file_i} unit#{i + 1} | {row_text}")
             state["imported_summaries"].append(
-                f"order_id={order_id} | 平台={platform_for_order} | {seconds}秒 | 代表檔次≈{spots}/日 | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
+                f"order_id={order_id} | 平台={platform_for_order} | {seconds}秒 | 代表檔次≈{spots}/日 | 秒數用途={ragic_seconds_type or '（空白）'} | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
             )
 
         imported_now = len(rows_out) - rows_before
@@ -921,9 +929,8 @@ def import_ragic_to_orders_by_date_range_service(
         for rid, t in staged_rows:
             oid = _norm_text(t[0])
             old_row = existing_rows.get(oid)
-            old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
             incoming_seconds_type = _norm_text(t[13] if len(t) > 13 else "")
-            effective_seconds_type = old_seconds_type if incoming_seconds_type == "" else incoming_seconds_type
+            effective_seconds_type = incoming_seconds_type
             if old_row is None:
                 inserted_count += 1
             else:
@@ -933,20 +940,6 @@ def import_ragic_to_orders_by_date_range_service(
                     skipped_count += 1
                 else:
                     updated_count += 1
-            if old_row is not None and incoming_seconds_type == "" and old_seconds_type:
-                st_e = entry_outcomes.get(rid)
-                if st_e is not None:
-                    st_e.setdefault("seconds_type_notes", [])
-                    st_e["seconds_type_notes"].append(
-                        f"order_id={oid}：匯入未帶秒數用途，沿用資料庫「{old_seconds_type}」"
-                    )
-            if old_row is not None and incoming_seconds_type != "" and old_seconds_type != incoming_seconds_type:
-                st_e = entry_outcomes.get(rid)
-                if st_e is not None:
-                    st_e.setdefault("seconds_type_notes", [])
-                    st_e["seconds_type_notes"].append(
-                        f"order_id={oid}：秒數用途將由「{old_seconds_type}」更新為「{incoming_seconds_type}」（本次匯入帶入）"
-                    )
 
         c.executemany(
             """
@@ -966,10 +959,7 @@ def import_ragic_to_orders_by_date_range_service(
                 amount_net=excluded.amount_net,
                 updated_at=excluded.updated_at,
                 contract_id=excluded.contract_id,
-                seconds_type=CASE
-                    WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
-                    ELSE excluded.seconds_type
-                END,
+                seconds_type=excluded.seconds_type,
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
                 region=excluded.region
@@ -985,13 +975,7 @@ def import_ragic_to_orders_by_date_range_service(
                 OR COALESCE(orders.spots, 0) != COALESCE(excluded.spots, 0)
                 OR COALESCE(orders.amount_net, 0) != COALESCE(excluded.amount_net, 0)
                 OR COALESCE(orders.contract_id, '') != COALESCE(excluded.contract_id, '')
-                OR COALESCE(orders.seconds_type, '') != COALESCE(
-                    CASE
-                        WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
-                        ELSE excluded.seconds_type
-                    END,
-                    ''
-                )
+                OR COALESCE(orders.seconds_type, '') != COALESCE(excluded.seconds_type, '')
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
@@ -1015,7 +999,8 @@ def import_ragic_to_orders_by_date_range_service(
         for cid in contracts_with_project:
             if cid:
                 compute_and_save_split_amount_for_contract(str(cid))
-        sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
+        # Ragic 匯入後強制即時同步，避免重啟時本機/雲端快照不一致。
+        sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=False)
         _log_ragic_import(
             get_db_connection=get_db_connection,
             batch_id=batch_id,
@@ -1207,9 +1192,8 @@ def import_ragic_single_entry_to_orders_service(
         for rid, t in staged_rows:
             oid = _norm_text(t[0])
             old_row = existing_rows.get(oid)
-            old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
             incoming_seconds_type = _norm_text(t[13] if len(t) > 13 else "")
-            effective_seconds_type = old_seconds_type if incoming_seconds_type == "" else incoming_seconds_type
+            effective_seconds_type = incoming_seconds_type
             if old_row is None:
                 inserted_count += 1
             else:
@@ -1219,20 +1203,6 @@ def import_ragic_single_entry_to_orders_service(
                     skipped_count += 1
                 else:
                     updated_count += 1
-            if old_row is not None and incoming_seconds_type == "" and old_seconds_type:
-                st_e = entry_outcomes.get(rid)
-                if st_e is not None:
-                    st_e.setdefault("seconds_type_notes", [])
-                    st_e["seconds_type_notes"].append(
-                        f"order_id={oid}：匯入未帶秒數用途，沿用資料庫「{old_seconds_type}」"
-                    )
-            if old_row is not None and incoming_seconds_type != "" and old_seconds_type != incoming_seconds_type:
-                st_e = entry_outcomes.get(rid)
-                if st_e is not None:
-                    st_e.setdefault("seconds_type_notes", [])
-                    st_e["seconds_type_notes"].append(
-                        f"order_id={oid}：秒數用途將由「{old_seconds_type}」更新為「{incoming_seconds_type}」（本次匯入帶入）"
-                    )
 
         c.executemany(
             """
@@ -1252,10 +1222,7 @@ def import_ragic_single_entry_to_orders_service(
                 amount_net=excluded.amount_net,
                 updated_at=excluded.updated_at,
                 contract_id=excluded.contract_id,
-                seconds_type=CASE
-                    WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
-                    ELSE excluded.seconds_type
-                END,
+                seconds_type=excluded.seconds_type,
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
                 region=excluded.region
@@ -1271,13 +1238,7 @@ def import_ragic_single_entry_to_orders_service(
                 OR COALESCE(orders.spots, 0) != COALESCE(excluded.spots, 0)
                 OR COALESCE(orders.amount_net, 0) != COALESCE(excluded.amount_net, 0)
                 OR COALESCE(orders.contract_id, '') != COALESCE(excluded.contract_id, '')
-                OR COALESCE(orders.seconds_type, '') != COALESCE(
-                    CASE
-                        WHEN excluded.seconds_type IS NULL OR TRIM(excluded.seconds_type) = '' THEN orders.seconds_type
-                        ELSE excluded.seconds_type
-                    END,
-                    ''
-                )
+                OR COALESCE(orders.seconds_type, '') != COALESCE(excluded.seconds_type, '')
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
@@ -1303,7 +1264,8 @@ def import_ragic_single_entry_to_orders_service(
         for cid in contracts_with_project:
             if cid:
                 compute_and_save_split_amount_for_contract(str(cid))
-        sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=True)
+        # Ragic 匯入後強制即時同步，避免重啟時本機/雲端快照不一致。
+        sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=False)
         _log_ragic_import(
             get_db_connection=get_db_connection,
             batch_id=batch_id,
