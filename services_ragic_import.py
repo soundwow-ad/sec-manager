@@ -845,6 +845,18 @@ def import_ragic_to_orders_by_date_range_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
+        if contract_ids_in_batch:
+            placeholders = ",".join(["?"] * len(contract_ids_in_batch))
+            c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+            _log_ragic_import(
+                get_db_connection=get_db_connection,
+                batch_id=batch_id,
+                status="info",
+                phase="replace",
+                message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+            )
+
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
             """
@@ -1116,6 +1128,19 @@ def import_ragic_single_entry_to_orders_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
+        if contract_ids_in_batch:
+            placeholders = ",".join(["?"] * len(contract_ids_in_batch))
+            c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+            _log_ragic_import(
+                get_db_connection=get_db_connection,
+                batch_id=batch_id,
+                status="info",
+                phase="replace",
+                ragic_id=ragic_id_str,
+                message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+            )
+
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
             """
