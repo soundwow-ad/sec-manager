@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 import time
 from typing import Callable
+import re
 
 import streamlit as st
 
@@ -14,10 +15,26 @@ def render_sidebar_ragic_import(
     *,
     import_ragic_to_orders_by_date_range: Callable[..., tuple[bool, str, str, str]],
 ) -> None:
-    pend = st.session_state.pop("_ragic_import_detail_pending", None)
-    if pend:
-        with st.sidebar.expander("上次 Ragic 區間匯入詳情", expanded=True):
-            st.text(pend)
+    last = st.session_state.get("_ragic_import_last_summary")
+    if isinstance(last, dict):
+        ok = bool(last.get("ok"))
+        msg = str(last.get("msg", ""))
+        batch_id = str(last.get("batch_id", ""))
+        elapsed = float(last.get("elapsed_sec", 0) or 0)
+        if ok:
+            st.sidebar.success(msg or "Ragic 區間匯入完成")
+        else:
+            st.sidebar.error(msg or "Ragic 區間匯入失敗")
+        if batch_id:
+            st.sidebar.caption(f"Batch: `{batch_id}`")
+        if elapsed > 0:
+            st.sidebar.caption(f"耗時：約 {elapsed:.1f} 秒")
+        m = re.search(r"新增\s*(\d+).*更新\s*(\d+).*略過\s*(\d+)", msg)
+        if m:
+            c1, c2, c3 = st.sidebar.columns(3)
+            c1.metric("新增", m.group(1))
+            c2.metric("更新", m.group(2))
+            c3.metric("略過", m.group(3))
 
     with st.sidebar.expander("📥 匯入 Ragic（日期區間）", expanded=False):
         st.caption("可依 Ragic 指定日期欄位篩選區間，匯入該期間所有可解析的 CUE Excel。")
@@ -63,7 +80,10 @@ def render_sidebar_ragic_import(
             elif not (ragic_import_api_key or "").strip():
                 st.error("請輸入 Ragic API Key")
             else:
+                p = st.sidebar.progress(0, text="匯入進度：準備中")
+                t0 = time.perf_counter()
                 with st.spinner("正在從 Ragic 匯入資料（抓取、下載 Excel、解析、寫入）..."):
+                    p.progress(10, text="匯入進度：抓取 Ragic 列表")
                     ok, msg, batch_id, detail_report = import_ragic_to_orders_by_date_range(
                         ragic_url=ragic_import_url.strip(),
                         api_key=ragic_import_api_key.strip(),
@@ -72,16 +92,19 @@ def render_sidebar_ragic_import(
                         date_field=ragic_date_field,
                         replace_existing=False,
                     )
+                    p.progress(100, text="匯入進度：完成")
+                    elapsed = time.perf_counter() - t0
                     st.session_state["_ragic_last_batch_id"] = batch_id
-                    if detail_report and str(detail_report).strip():
-                        st.session_state["_ragic_import_detail_pending"] = detail_report
+                    st.session_state["_ragic_import_last_summary"] = {
+                        "ok": ok,
+                        "msg": msg,
+                        "batch_id": batch_id,
+                        "elapsed_sec": elapsed,
+                    }
                     if ok:
                         st.success(msg)
                         time.sleep(0.3)
                         st.rerun()
                     else:
                         st.error(msg)
-                        if detail_report and str(detail_report).strip():
-                            with st.expander("匯入詳情（含寫入 Ragic 秒數管理／備註結果）", expanded=True):
-                                st.text(detail_report)
 

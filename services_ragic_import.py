@@ -384,6 +384,18 @@ def _extract_segments_seconds_type_blocks(note_text: str) -> list[str]:
     return blocks
 
 
+def _remove_segments_seconds_type_blocks(note_text: str) -> str:
+    """
+    移除備註中所有【Segments 秒數用途更新紀錄】區塊，保留其他內容。
+    """
+    txt = str(note_text or "")
+    marker = "【Segments 秒數用途更新紀錄】"
+    if marker not in txt:
+        return txt.strip()
+    head = txt.split(marker)[0].rstrip()
+    return head.strip()
+
+
 def _extract_latest_seconds_type_from_note(note_text: str) -> str:
     """
     從「秒數管理(備註)」中擷取最後一次 Segments 更新紀錄的 seconds_type。
@@ -1484,7 +1496,8 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
                 *lines,
             ]
         )
-        new_note = ((old_note.rstrip() + "\n\n" + append_block) if old_note.strip() else append_block).strip()
+        base_note = _remove_segments_seconds_type_blocks(old_note)
+        new_note = ((base_note.rstrip() + "\n\n" + append_block) if base_note.strip() else append_block).strip()
         new_note = _truncate_seconds_remark(new_note)
         ok, err = post_update_entry_fields(ref, rid, {str(fid_note): new_note}, api_key)
         if ok:
