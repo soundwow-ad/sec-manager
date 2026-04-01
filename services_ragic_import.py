@@ -490,6 +490,9 @@ def _ragic_entry_collect_order_rows(
     get_db_connection: Callable[[], object],
     batch_id: str,
     max_files: int | None = None,
+    progress_cb: Callable[[dict], None] | None = None,
+    entry_index: int | None = None,
+    entry_total: int | None = None,
 ) -> tuple[list[tuple[str, tuple]], dict]:
     from ragic_client import parse_file_tokens, download_file
     from services_media_platform import parse_platform_region as _parse_platform_region
@@ -562,6 +565,19 @@ def _ragic_entry_collect_order_rows(
 
     for file_i, token in enumerate(excel_tokens, start=1):
         tok_short = str(token) if len(str(token)) <= 52 else str(token)[:50] + "…"
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "file_download_start",
+                    "ragic_id": rid_s,
+                    "entry_index": entry_index,
+                    "entry_total": entry_total,
+                    "file_index": file_i,
+                    "file_total": len(excel_tokens),
+                    "token": tok_short,
+                    "message": f"RagicId {rid_s} 檔案 {file_i}/{len(excel_tokens)}：下載中",
+                }
+            )
         flog = {
             "file_index": file_i,
             "token_short": tok_short,
@@ -589,6 +605,19 @@ def _ragic_entry_collect_order_rows(
         cue_parse_diag: list[str] = []
         cue_layout_sec: list[str] = []
         cue_struct_sec: list[str] = []
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "file_parse_start",
+                    "ragic_id": rid_s,
+                    "entry_index": entry_index,
+                    "entry_total": entry_total,
+                    "file_index": file_i,
+                    "file_total": len(excel_tokens),
+                    "token": tok_short,
+                    "message": f"RagicId {rid_s} 檔案 {file_i}/{len(excel_tokens)}：解析中",
+                }
+            )
         try:
             cue_units = parse_cue_excel_for_table1(
                 content,
@@ -781,6 +810,20 @@ def _ragic_entry_collect_order_rows(
             )
 
         imported_now = len(rows_out) - rows_before
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "file_parse_done",
+                    "ragic_id": rid_s,
+                    "entry_index": entry_index,
+                    "entry_total": entry_total,
+                    "file_index": file_i,
+                    "file_total": len(excel_tokens),
+                    "token": tok_short,
+                    "imported_rows": imported_now,
+                    "message": f"RagicId {rid_s} 檔案 {file_i}/{len(excel_tokens)}：完成（入庫列 {imported_now}）",
+                }
+            )
         flog["imported"] = imported_now
         state["file_logs"].append(flog)
         if imported_now <= 0:
@@ -831,7 +874,17 @@ def import_ragic_to_orders_by_date_range_service(
     compute_and_save_split_amount_for_contract: Callable[[str], None],
     sync_sheets_if_enabled: Callable[..., None],
     normalize_date: Callable[[str], str],
+    progress_cb: Callable[[dict], None] | None = None,
 ) -> tuple[bool, str, str, str]:
+    def _emit(stage: str, message: str, **extra):
+        if progress_cb:
+            payload = {"stage": stage, "message": message}
+            payload.update(extra)
+            try:
+                progress_cb(payload)
+            except Exception:
+                pass
+
     def ragic_to_date(v):
         if v is None:
             return None
@@ -854,6 +907,7 @@ def import_ragic_to_orders_by_date_range_service(
         return True
 
     batch_id = f"ragic_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    _emit("start", "開始匯入：初始化")
     _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="info", phase="summary", message=f"開始匯入：{date_field} {date_from}~{date_to}")
 
     if not ragic_url or not str(ragic_url).strip():
@@ -873,6 +927,7 @@ def import_ragic_to_orders_by_date_range_service(
     limit = 200
     all_entries = []
     for offset in range(0, max_fetch, limit):
+        _emit("fetch_page", f"抓取 Ragic 列表 offset={offset}", offset=offset)
         url = make_listing_url(ref, limit=limit, offset=offset, subtables0=False, fts="")
         payload, err = get_json(url, api_key, timeout=60)
         if err:
@@ -894,6 +949,7 @@ def import_ragic_to_orders_by_date_range_service(
         return False, "Ragic 無資料可匯入", batch_id, ""
 
     filtered = [e for e in all_entries if entry_in_date_range(e, date_from, date_to, field_name=date_field)]
+    _emit("filter_done", f"日期篩選完成：{len(filtered)} 筆", filtered_count=len(filtered))
     _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="info", phase="filter", imported_orders=len(filtered), message=f"日期篩選後 entries={len(filtered)}")
     if not filtered:
         return False, "指定日期區間內無資料", batch_id, ""
@@ -901,7 +957,9 @@ def import_ragic_to_orders_by_date_range_service(
     existing_order_id_map = _load_existing_order_id_map(get_db_connection)
     entry_outcomes: dict[str, dict] = {}
     staged_rows: list[tuple[str, tuple]] = []
-    for entry in filtered:
+    for idx, entry in enumerate(filtered, start=1):
+        rid = str(entry.get("_ragicId") or "")
+        _emit("entry_start", f"處理第 {idx}/{len(filtered)} 筆 Ragic（ID={rid}）", entry_index=idx, entry_total=len(filtered), ragic_id=rid)
         chunk, state = _ragic_entry_collect_order_rows(
             entry,
             ref,
@@ -913,6 +971,9 @@ def import_ragic_to_orders_by_date_range_service(
             get_db_connection=get_db_connection,
             batch_id=batch_id,
             max_files=None,
+            progress_cb=progress_cb,
+            entry_index=idx,
+            entry_total=len(filtered),
         )
         entry_outcomes[state["ragic_id"]] = state
         staged_rows.extend(chunk)
@@ -943,6 +1004,7 @@ def import_ragic_to_orders_by_date_range_service(
         )
         return False, "日期區間有資料，但無可匯入的 CUE 解析結果", batch_id, push_detail
 
+    _emit("db_write_start", f"開始寫入本地資料庫：{len(order_rows)} 筆")
     init_db()
     conn = get_db_connection()
     c = conn.cursor()
@@ -1048,6 +1110,7 @@ def import_ragic_to_orders_by_date_range_service(
         df_orders = pd.read_sql("SELECT * FROM orders", conn_read)
         conn_read.close()
         build_ad_flight_segments(df_orders, load_platform_settings(), write_to_db=True, sync_sheets=False)
+        _emit("segments_built", "已完成 segments 重建")
         contracts_with_project = (
             df_orders.loc[
                 df_orders["project_amount_net"].notna() & (pd.to_numeric(df_orders["project_amount_net"], errors="coerce") > 0),
@@ -1108,6 +1171,7 @@ def import_ragic_to_orders_by_date_range_service(
             imported_orders=len(order_rows),
             message=detail_report,
         )
+        _emit("done", "匯入完成")
         return (
             True,
             (

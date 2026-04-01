@@ -81,7 +81,36 @@ def render_sidebar_ragic_import(
                 st.error("請輸入 Ragic API Key")
             else:
                 p = st.sidebar.progress(0, text="匯入進度：準備中")
+                status_box = st.sidebar.empty()
                 t0 = time.perf_counter()
+
+                def _on_progress(evt: dict) -> None:
+                    stage = str(evt.get("stage", "") or "")
+                    msg_txt = str(evt.get("message", "") or "")
+                    if stage == "fetch_page":
+                        p.progress(12, text=f"匯入進度：{msg_txt}")
+                    elif stage == "filter_done":
+                        p.progress(20, text=f"匯入進度：{msg_txt}")
+                    elif stage == "entry_start":
+                        idx = int(evt.get("entry_index", 1) or 1)
+                        total = max(int(evt.get("entry_total", 1) or 1), 1)
+                        frac = idx / total
+                        pct = int(20 + frac * 60)  # 20%~80%
+                        p.progress(min(80, max(20, pct)), text=f"匯入進度：{msg_txt}")
+                    elif stage in ("file_download_start", "file_parse_start", "file_parse_done"):
+                        idx = int(evt.get("entry_index", 1) or 1)
+                        total = max(int(evt.get("entry_total", 1) or 1), 1)
+                        base = 20 + int((idx - 1) / total * 60)
+                        p.progress(min(80, max(20, base)), text=f"匯入進度：{msg_txt}")
+                    elif stage == "db_write_start":
+                        p.progress(85, text=f"匯入進度：{msg_txt}")
+                    elif stage == "segments_built":
+                        p.progress(92, text=f"匯入進度：{msg_txt}")
+                    elif stage == "done":
+                        p.progress(100, text="匯入進度：完成")
+                    if msg_txt:
+                        status_box.caption(f"目前動作：{msg_txt}")
+
                 with st.spinner("正在從 Ragic 匯入資料（抓取、下載 Excel、解析、寫入）..."):
                     p.progress(10, text="匯入進度：抓取 Ragic 列表")
                     ok, msg, batch_id, detail_report = import_ragic_to_orders_by_date_range(
@@ -91,6 +120,7 @@ def render_sidebar_ragic_import(
                         date_to=ragic_date_to,
                         date_field=ragic_date_field,
                         replace_existing=False,
+                        progress_cb=_on_progress,
                     )
                     p.progress(100, text="匯入進度：完成")
                     elapsed = time.perf_counter() - t0

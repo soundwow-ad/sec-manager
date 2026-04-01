@@ -492,6 +492,7 @@ def import_ragic_to_orders_by_date_range(
     date_field: str = "建立日期",
     replace_existing: bool = False,
     max_fetch: int = 5000,
+    progress_cb=None,
 ):
     from services_ragic_import import import_ragic_to_orders_by_date_range_service
 
@@ -512,6 +513,7 @@ def import_ragic_to_orders_by_date_range(
         compute_and_save_split_amount_for_contract=_compute_and_save_split_amount_for_contract,
         sync_sheets_if_enabled=_sync_sheets_if_enabled,
         normalize_date=_normalize_date,
+        progress_cb=progress_cb,
     )
 
 
