@@ -455,6 +455,45 @@ def _safe_spots(val):
         return 0
 
 
+def format_cue_sheet_matrix_for_report(
+    df: pd.DataFrame,
+    sheet_name: str,
+    *,
+    max_rows: int = 60,
+    max_cols: int = 36,
+    cell_max: int = 14,
+) -> str:
+    """
+    將工作表前段列／欄以 tab 分隔輸出，供 Ragic 備註除錯（欄為 pandas 0-based 索引）。
+    """
+    if df is None or df.empty:
+        return f'工作表「{sheet_name}」：（空白）'
+    nr = min(len(df), max(1, max_rows))
+    nc = min(int(df.shape[1]), max(1, max_cols))
+    lines: list[str] = [
+        f'工作表「{sheet_name}」：總 {len(df)} 列 × {df.shape[1]} 欄；以下為前 {nr} 列 × 前 {nc} 欄（tab 分隔，列欄皆 0-based）',
+        "列\\欄\t" + "\t".join(str(j) for j in range(nc)),
+    ]
+    for ri in range(nr):
+        cells: list[str] = [str(ri)]
+        for ci in range(nc):
+            try:
+                v = df.iloc[ri, ci]
+            except Exception:
+                v = ""
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                s = ""
+            else:
+                s = str(v).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+            if len(s) > cell_max:
+                s = s[: max(1, cell_max - 1)] + "…"
+            cells.append(s)
+        lines.append("\t".join(cells))
+    if len(df) > nr or df.shape[1] > nc:
+        lines.append(f"…（已截斷；尚餘約 {max(0, len(df) - nr)} 列、{max(0, df.shape[1] - nc)} 欄未列出）")
+    return "\n".join(lines)
+
+
 def _extract_seconds_from_cell(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0
@@ -470,7 +509,11 @@ def _extract_seconds_from_cell(val):
     return 0
 
 
-def parse_cueapp_excel(file_content, diagnostics_out: list | None = None):
+def parse_cueapp_excel(
+    file_content,
+    diagnostics_out: list | None = None,
+    layout_sections_out: list | None = None,
+):
     result = []
     try:
         excel_file = io.BytesIO(file_content)
@@ -486,6 +529,11 @@ def parse_cueapp_excel(file_content, diagnostics_out: list | None = None):
 
             excel_file.seek(0)
             df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None, engine="openpyxl")
+            if layout_sections_out is not None:
+                try:
+                    layout_sections_out.append(format_cue_sheet_matrix_for_report(df, sheet_name))
+                except Exception as ex:
+                    layout_sections_out.append(f'工作表「{sheet_name}」版面摘錄失敗：{ex}')
             if df.empty or len(df) < 9:
                 _diag("略過：工作表為空或列數 < 9。")
                 continue
@@ -1143,7 +1191,12 @@ def parse_cueapp_excel_with_report(file_content: bytes) -> dict:
         warnings.append(f"快速掃描例外：{e}")
 
     parse_diagnostics: list[str] = []
-    ad_units = parse_cueapp_excel(file_content, diagnostics_out=parse_diagnostics)
+    excel_layout_sections: list[str] = []
+    ad_units = parse_cueapp_excel(
+        file_content,
+        diagnostics_out=parse_diagnostics,
+        layout_sections_out=excel_layout_sections,
+    )
 
     sheets_report: list[dict] = []
     try:
@@ -1234,6 +1287,7 @@ def parse_cueapp_excel_with_report(file_content: bytes) -> dict:
         "workbook_scan": workbook_scan,
         "sheets": sheets_report,
         "parse_diagnostics": parse_diagnostics,
+        "excel_layout_sections": excel_layout_sections,
         "issues": issues,
         "warnings": warnings,
     }
@@ -1412,10 +1466,19 @@ def parse_excel_daily_ads(file_content, target_spots=None):
         return result
 
 
-def parse_cue_excel_for_table1(file_content, order_info=None, cue_parse_diagnostics: list | None = None):
+def parse_cue_excel_for_table1(
+    file_content,
+    order_info=None,
+    cue_parse_diagnostics: list | None = None,
+    cue_layout_sections: list | None = None,
+):
     result = []
     try:
-        result = parse_cueapp_excel(file_content, diagnostics_out=cue_parse_diagnostics)
+        result = parse_cueapp_excel(
+            file_content,
+            diagnostics_out=cue_parse_diagnostics,
+            layout_sections_out=cue_layout_sections,
+        )
         if result:
             if order_info:
                 for ad_unit in result:
@@ -1430,6 +1493,21 @@ def parse_cue_excel_for_table1(file_content, order_info=None, cue_parse_diagnost
                         }
                     )
             return result
+
+        if cue_layout_sections is not None and len(cue_layout_sections) == 0:
+            try:
+                bio = io.BytesIO(file_content)
+                x2 = pd.ExcelFile(bio, engine="openpyxl")
+                for sn in x2.sheet_names:
+                    bio.seek(0)
+                    df0 = pd.read_excel(bio, sheet_name=sn, header=None, engine="openpyxl")
+                    cue_layout_sections.append(format_cue_sheet_matrix_for_report(df0, sn))
+                try:
+                    x2.close()
+                except Exception:
+                    pass
+            except Exception as e:
+                cue_layout_sections.append(f"（Cueapp 未產生列且備援讀檔輸出版面失敗：{e}）")
 
         excel_file = io.BytesIO(file_content)
         excel_file.seek(0)

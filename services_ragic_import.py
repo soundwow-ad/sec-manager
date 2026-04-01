@@ -320,6 +320,12 @@ def _compose_seconds_mgmt_remark(*, state: dict, batch_id: str, seconds_type_not
         lines.append("【檔案或整體流程問題】")
         lines.extend(state["issues"])
         lines.append("")
+    if state.get("cue_excel_layout_sections"):
+        lines.append(
+            "【CUE Excel 版面摘錄（pandas 讀入、無表頭；列／欄皆 0-based；tab 分隔；供與解析診斷對照）】"
+        )
+        lines.extend(state["cue_excel_layout_sections"])
+        lines.append("")
     if state.get("file_logs"):
         lines.append("【各 CUE 檔處理】")
         for fl in state["file_logs"]:
@@ -419,6 +425,7 @@ def _ragic_entry_collect_order_rows(
         "imported_summaries": [],
         "skipped_summaries": [],
         "seconds_type_notes": [],
+        "cue_excel_layout_sections": [],
     }
 
     rows_out: list[tuple[str, tuple]] = []
@@ -471,9 +478,13 @@ def _ragic_entry_collect_order_rows(
             )
             continue
         cue_parse_diag: list[str] = []
+        cue_layout_sec: list[str] = []
         try:
             cue_units = parse_cue_excel_for_table1(
-                content, order_info=order_info, cue_parse_diagnostics=cue_parse_diag
+                content,
+                order_info=order_info,
+                cue_parse_diagnostics=cue_parse_diag,
+                cue_layout_sections=cue_layout_sec,
             )
         except Exception as e:
             cue_units = []
@@ -495,6 +506,12 @@ def _ragic_entry_collect_order_rows(
 
         flog["n_units"] = len(cue_units)
         flog["cue_parse_diagnostics"] = cue_parse_diag
+        flog["cue_layout_sections"] = cue_layout_sec
+        if cue_layout_sec:
+            state["cue_excel_layout_sections"].append(
+                f"──── 檔案#{file_i}（{flog.get('token_short', '')}）────\n"
+                + "\n\n".join(cue_layout_sec)
+            )
         if not cue_units:
             state["file_logs"].append(flog)
             state["issues"].append(f"檔案#{file_i} 解析不到可用 ad_unit")
