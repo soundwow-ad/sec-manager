@@ -45,6 +45,39 @@ def render_ragic_logs_tab(
         f = f[f["phase"].astype(str) == sel_phase]
 
     st.dataframe(styler_one_decimal(f), use_container_width=True, height=520, hide_index=True)
+    if not f.empty:
+        st.markdown("#### 🔎 紀錄詳情")
+        f_view = f.reset_index(drop=True).copy()
+        options = list(range(len(f_view)))
+
+        def _label(i: int) -> str:
+            r = f_view.iloc[i]
+            return (
+                f"{r.get('created_at', '')} | "
+                f"batch={r.get('batch_id', '')} | "
+                f"status={r.get('status', '')} | "
+                f"phase={r.get('phase', '')}"
+            )
+
+        idx = st.selectbox("選擇一筆紀錄", options=options, format_func=_label, key="ragic_log_detail_idx")
+        row = f_view.iloc[int(idx)]
+        st.caption(
+            f"batch_id=`{row.get('batch_id', '')}` | status=`{row.get('status', '')}` | "
+            f"phase=`{row.get('phase', '')}` | ragic_id=`{row.get('ragic_id', '')}`"
+        )
+        msg = str(row.get("message", "") or "")
+        if msg:
+            st.code(msg, language="text")
+        else:
+            st.info("此筆無 message 內容。")
+
+        with st.expander("顯示同批次完整時間序", expanded=False):
+            batch_id = str(row.get("batch_id", "") or "")
+            if batch_id:
+                b = logs[logs["batch_id"].astype(str) == batch_id].copy()
+                st.dataframe(styler_one_decimal(b), use_container_width=True, height=300, hide_index=True)
+            else:
+                st.info("此筆沒有 batch_id。")
     st.download_button(
         "📥 下載匯入紀錄 CSV",
         data=f.to_csv(index=False, encoding="utf-8-sig"),

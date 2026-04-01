@@ -859,6 +859,10 @@ def import_ragic_to_orders_by_date_range_service(
         if err:
             _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="failed", phase="fetch", message=f"offset={offset} 抓取失敗：{err}")
             return False, f"抓取 Ragic 失敗（offset={offset}）：{err}", batch_id, ""
+        if isinstance(payload, dict) and str(payload.get("status", "")).upper() == "ERROR":
+            msg = str(payload.get("message", "") or "Ragic status=ERROR")
+            _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="failed", phase="fetch", message=f"offset={offset} Ragic 回傳錯誤：{msg}")
+            return False, f"Ragic 回傳錯誤（offset={offset}）：{msg}", batch_id, ""
         entries = extract_entries(payload)
         if not entries:
             break
@@ -924,17 +928,27 @@ def import_ragic_to_orders_by_date_range_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
-        if contract_ids_in_batch:
-            placeholders = ",".join(["?"] * len(contract_ids_in_batch))
-            c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+        if replace_existing:
+            c.execute("DELETE FROM orders")
             _log_ragic_import(
                 get_db_connection=get_db_connection,
                 batch_id=batch_id,
                 status="info",
                 phase="replace",
-                message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+                message="replace_existing=True：已清空 orders 舊資料",
             )
+        else:
+            contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
+            if contract_ids_in_batch:
+                placeholders = ",".join(["?"] * len(contract_ids_in_batch))
+                c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+                _log_ragic_import(
+                    get_db_connection=get_db_connection,
+                    batch_id=batch_id,
+                    status="info",
+                    phase="replace",
+                    message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+                )
 
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
@@ -1056,14 +1070,25 @@ def import_ragic_to_orders_by_date_range_service(
             summary_lines.append(
                 f"  RagicId={rid} | id={t[0]} | 平台={t[1]} | 秒數={t[8]} | 檔次={t[9]} | 走期={t[6]}~{t[7]} | contract_id={t[12]}"
             )
-        if state.get("uploaded_rows_detail"):
+        uploaded_rows_detail_all: list[str] = []
+        for st in entry_outcomes.values():
+            uploaded_rows_detail_all.extend(list(st.get("uploaded_rows_detail") or []))
+        if uploaded_rows_detail_all:
             summary_lines.append("")
             summary_lines.append("【上傳至 orders 的完整欄位快照（每筆）】")
-            summary_lines.extend(state["uploaded_rows_detail"][:200])
-            if len(state["uploaded_rows_detail"]) > 200:
-                summary_lines.append(f"... 其餘 {len(state['uploaded_rows_detail']) - 200} 列略")
+            summary_lines.extend(uploaded_rows_detail_all[:200])
+            if len(uploaded_rows_detail_all) > 200:
+                summary_lines.append(f"... 其餘 {len(uploaded_rows_detail_all) - 200} 列略")
         summary_lines.append("")
         detail_report = "\n".join(summary_lines) + push_detail
+        _log_ragic_import(
+            get_db_connection=get_db_connection,
+            batch_id=batch_id,
+            status="info",
+            phase="detail",
+            imported_orders=len(order_rows),
+            message=detail_report,
+        )
         return (
             True,
             (
@@ -1186,18 +1211,29 @@ def import_ragic_single_entry_to_orders_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
-        if contract_ids_in_batch:
-            placeholders = ",".join(["?"] * len(contract_ids_in_batch))
-            c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+        if replace_existing:
+            c.execute("DELETE FROM orders")
             _log_ragic_import(
                 get_db_connection=get_db_connection,
                 batch_id=batch_id,
                 status="info",
                 phase="replace",
                 ragic_id=ragic_id_str,
-                message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+                message="replace_existing=True：已清空 orders 舊資料",
             )
+        else:
+            contract_ids_in_batch = sorted({str(t[12]).strip() for _, t in staged_rows if len(t) > 12 and str(t[12]).strip()})
+            if contract_ids_in_batch:
+                placeholders = ",".join(["?"] * len(contract_ids_in_batch))
+                c.execute(f"DELETE FROM orders WHERE contract_id IN ({placeholders})", contract_ids_in_batch)
+                _log_ragic_import(
+                    get_db_connection=get_db_connection,
+                    batch_id=batch_id,
+                    status="info",
+                    phase="replace",
+                    ragic_id=ragic_id_str,
+                    message=f"已清除同訂檔單號舊資料：{', '.join(contract_ids_in_batch)}",
+                )
 
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
@@ -1329,6 +1365,15 @@ def import_ragic_single_entry_to_orders_service(
                 summary_lines.append(f"... 其餘 {len(state['uploaded_rows_detail']) - 200} 列略")
         summary_lines.append("")
         detail_report = "\n".join(summary_lines) + push_detail
+        _log_ragic_import(
+            get_db_connection=get_db_connection,
+            batch_id=batch_id,
+            status="info",
+            phase="detail",
+            ragic_id=ragic_id_str,
+            imported_orders=len(order_rows),
+            message=detail_report,
+        )
         return (
             True,
             (
