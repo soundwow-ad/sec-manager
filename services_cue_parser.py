@@ -1158,14 +1158,27 @@ def parse_cueapp_excel(
                     dates_str = None
                     _diag(f"重建逐日日期字串時發生例外（已改以執行期間填補）：{e}")
             if not dates_str:
-                date_list = pd.date_range(start_date, end_date, freq="D")
-                if len(date_list) != eff_days:
-                    date_list = date_list[:eff_days]
-                dates_str = [d.strftime("%Y-%m-%d") for d in date_list]
-                if fmt in ("bolin", "shenghuo"):
-                    _diag(
-                        f"逐日日期改由執行期間連續展開（{eff_days} 天）；若與表頭「幾日」不完全對齊，請以表頭為準人工核對。"
-                    )
+                try:
+                    if start_date is None or end_date is None:
+                        _diag(
+                            "無表頭逐日字串且無法取得執行起迄日期（請確認「執行期間」列是否可被掃到），略過本分頁。"
+                        )
+                        continue
+                    date_list = pd.date_range(start_date, end_date, freq="D")
+                    if len(date_list) != eff_days:
+                        date_list = date_list[:eff_days]
+                    dates_str = [d.strftime("%Y-%m-%d") for d in date_list]
+                    if fmt in ("bolin", "shenghuo"):
+                        _diag(
+                            f"逐日日期改由執行期間連續展開（{eff_days} 天）；若與表頭「幾日」不完全對齊，請以表頭為準人工核對。"
+                        )
+                except Exception as e:
+                    _diag(f"由執行期間展開逐日失敗（已略過本分頁）：{type(e).__name__}: {e}")
+                    continue
+
+            if not dates_str or len(dates_str) == 0:
+                _diag("逐日日期陣列仍為空，略過本分頁。")
+                continue
 
             if (
                 fmt in ("bolin", "shenghuo")
@@ -1183,6 +1196,12 @@ def parse_cueapp_excel(
             elif data_start_row is None:
                 data_start_row = (header_row_idx if header_row_idx is not None else 0) + 2
 
+            try:
+                data_start_row = int(data_start_row)
+            except (TypeError, ValueError):
+                _diag(f"資料起始列無法轉成整數（值={data_start_row!r}），改用表頭下第 3 列。")
+                data_start_row = (int(header_row_idx) if header_row_idx is not None else 0) + 2
+
             platform_info = _extract_platform_from_sheet(df, sheet_name)
             seconds_info = _extract_seconds_from_sheet(df, sheet_name)
             default_seconds = seconds_info.get("seconds", 0)
@@ -1196,7 +1215,17 @@ def parse_cueapp_excel(
                         if date_start_col is not None and date_start_col < len(row):
                             day_marker = str(row.iloc[date_start_col]).strip()
                             if day_marker in ("一", "二", "三", "四", "五", "六", "日"):
-                                continue
+                                span = max(4, int(eff_days or 0))
+                                n_spot_like = sum(
+                                    1
+                                    for j in range(
+                                        date_start_col,
+                                        min(len(row), date_start_col + span),
+                                    )
+                                    if _safe_spots(row.iloc[j]) > 0
+                                )
+                                if n_spot_like < 2:
+                                    continue
                     except Exception:
                         pass
                     total_chk_col = sec_col if fmt in ("bolin", "shenghuo") and sec_col is not None else 4
@@ -1264,7 +1293,11 @@ def parse_cueapp_excel(
                         result.append(ad_unit)
                 except (IndexError, KeyError, ValueError, TypeError):
                     continue
-        except Exception:
+        except Exception as ex:
+            if diagnostics_out is not None:
+                diagnostics_out.append(
+                    f"[{sheet_name}] 本分頁解析未預期例外（已略過）：{type(ex).__name__}: {ex}"
+                )
             continue
 
     try:
