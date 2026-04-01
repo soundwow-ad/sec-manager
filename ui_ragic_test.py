@@ -685,6 +685,7 @@ def render_ragic_test_tab(
 
     # 二、CUE Excel 解析成表1（與主程式 表1-資料 完整權限同欄位、缺值顯示無法判斷/抓不到）
     st.markdown("##### 二、CUE Excel 解析為表1（與 📋 表1-資料 同欄位，缺值顯示「無法判斷」/「抓不到」）")
+    st.caption("若解析失敗或想對照表頭：請展開下方各 CUE 檔，在成功下載後可使用「下載此 CUE Excel 到本機」另存，再以 Excel 開啟除錯。")
     cue_fid = ragic_fields.get("訂檔CUE表")
     cue_val = entry.get(cue_fid) if cue_fid and cue_fid in entry else entry.get("訂檔CUE表")
     cue_tokens = parse_file_tokens(cue_val)
@@ -697,6 +698,8 @@ def render_ragic_test_tab(
     build_table1 = build_table1_from_cue_excel if build_table1_from_cue_excel else None
 
     all_table1_dfs: list[pd.DataFrame] = []
+    if not excel_tokens:
+        st.info("未偵測到 CUE 的 .xlsx / .xls 附件（請確認 Ragic「訂檔CUE表」欄位）。")
     for i, tok in enumerate(excel_tokens, start=1):
         with st.expander(f"CUE 檔案 {i}：{tok[:50]}...", expanded=(i == 1)):
             if not api_key_use:
@@ -706,6 +709,20 @@ def render_ragic_test_tab(
             if derr or not content:
                 st.error(f"下載失敗：{derr}")
                 continue
+            _cue_ext = ".xlsx" if str(tok).lower().endswith(".xlsx") else (".xls" if str(tok).lower().endswith(".xls") else ".xlsx")
+            _cue_mime = (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                if _cue_ext == ".xlsx"
+                else "application/vnd.ms-excel"
+            )
+            st.download_button(
+                label="⬇️ 下載此 CUE Excel 到本機（除錯用）",
+                data=content,
+                file_name=f"CUE_Ragic{rid}_檔{i}{_cue_ext}",
+                mime=_cue_mime,
+                key=f"ragic_test_dl_cue_{str(rid)}_{i}",
+                help="與上方解析使用同一份下載內容；可另存後檢查工作表結構與表頭。",
+            )
             cue_units = parse_cue_excel_for_table1(content, order_info=order_info)
             if not cue_units:
                 st.warning("此檔案未解析出每日檔次（可能非 CUE 版型）。")
