@@ -331,6 +331,9 @@ def _apply_split_amount_by_spots(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "拆分金額" not in out.columns:
         out["拆分金額"] = PLACEHOLDER_MISSING
+    else:
+        # pandas 2.x + pyarrow 字串欄位不接受直接寫入 int，先轉 object 避免 TypeError
+        out["拆分金額"] = out["拆分金額"].astype(object)
 
     for contract_id, idxs in out.groupby("合約編號").groups.items():
         idx_list = list(idxs)
