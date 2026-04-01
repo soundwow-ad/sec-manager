@@ -334,7 +334,10 @@ def render_table1_tab(
 
                     # 若選取列可對應到合約編號，附加回寫到 Ragic「秒數管理(備註)」以便後續追蹤。
                     try:
+                        ragic_report_lines: list[str] = []
                         notes_by_contract: dict[str, list[str]] = {}
+                        selected_count = int(len(seg_id_selected_list))
+                        ragic_report_lines.append(f"選取 segments 筆數：{selected_count}")
                         if (
                             not selected_rows_df.empty
                             and "source_order_id" in selected_rows_df.columns
@@ -349,6 +352,7 @@ def render_table1_tab(
                             m = m.merge(od, left_on="source_order_id", right_on="id", how="left", suffixes=("", "_ord"))
                             m["contract_id"] = m["contract_id"].astype(str).str.strip()
                             m = m[m["contract_id"] != ""]
+                            ragic_report_lines.append(f"可映射合約筆數：{len(m)}")
                             for cid, g in m.groupby("contract_id"):
                                 notes_by_contract[str(cid)] = [
                                     (
@@ -357,6 +361,10 @@ def render_table1_tab(
                                         f"範圍={str(g['start_date'].min())}~{str(g['end_date'].max())}"
                                     )
                                 ]
+                        else:
+                            ragic_report_lines.append("無法建立合約映射（缺少 source_order_id / orders.id / orders.contract_id）。")
+
+                        ragic_report_lines.append(f"可回寫合約數：{len(notes_by_contract)}")
                         if notes_by_contract:
                             from config_ragic import RAGIC_FIELDS
                             from services_ragic_import import append_seconds_type_notes_to_ragic_by_contract_service
@@ -375,12 +383,15 @@ def render_table1_tab(
                                 pass
                             ragic_url_use = next((str(x).strip() for x in ragic_url_candidates if str(x).strip()), "")
                             api_key_use = next((str(x).strip() for x in api_key_candidates if str(x).strip()), "")
+                            ragic_report_lines.append(f"Ragic URL 可用：{'是' if bool(ragic_url_use) else '否'}")
+                            ragic_report_lines.append(f"Ragic API Key 可用：{'是' if bool(api_key_use) else '否'}")
                             touched, ragic_msgs = append_seconds_type_notes_to_ragic_by_contract_service(
                                 ragic_url=ragic_url_use,
                                 api_key=api_key_use,
                                 ragic_fields=RAGIC_FIELDS,
                                 notes_by_contract=notes_by_contract,
                             )
+                            ragic_report_lines.extend([str(x) for x in ragic_msgs])
                             failed_msgs = [m for m in ragic_msgs if ("失敗" in str(m) or "找不到" in str(m))]
                             if touched > 0 and not failed_msgs:
                                 st.success(f"Ragic 秒數用途回寫成功：{touched} 筆")
@@ -388,11 +399,13 @@ def render_table1_tab(
                                 st.warning(f"Ragic 秒數用途回寫部分成功：成功 {touched}，異常 {len(failed_msgs)}")
                             else:
                                 st.error("Ragic 秒數用途回寫未成功。")
-                            if ragic_msgs:
-                                with st.expander("查看 Ragic 上傳結果明細", expanded=True):
-                                    st.code("\n".join([str(x) for x in ragic_msgs]), language="text")
+                        else:
+                            st.warning("此次沒有可回寫到 Ragic 的合約（因此不會發送 API 更新）。")
+                            ragic_report_lines.append("未送出 API 更新：可回寫合約數為 0。")
+                        with st.expander("查看 Ragic 上傳結果明細", expanded=True):
+                            st.code("\n".join(ragic_report_lines), language="text")
                     except Exception as e:
-                        st.caption(f"ℹ️ Ragic 秒數管理備註回寫略過：{e}")
+                        st.error(f"Ragic 秒數管理備註回寫例外：{e}")
 
                     if "_table1_cache_key" in st.session_state:
                         del st.session_state["_table1_cache_key"]
