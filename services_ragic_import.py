@@ -564,6 +564,12 @@ def _ragic_entry_collect_order_rows(
             end_date = str(u.get("end_date") or _ragic_get_field(entry, "執行結束日期", ragic_fields) or "")
             seconds = int(u.get("seconds") or 0)
             platform = str(u.get("platform") or _ragic_get_field(entry, "平台", ragic_fields) or "")
+            region = str(u.get("region") or "").strip()
+            platform_for_order = platform
+            # orders.platform 會被後續 parse_platform_region 反解析成 segment.region；
+            # 若平台字串未帶區域，表1 會顯示「區域=未知」。
+            if region and region != "未知" and (region not in platform_for_order):
+                platform_for_order = f"{platform_for_order}-{region}"
 
             skip_reason = None
             if seconds <= 0 or spots <= 0:
@@ -571,7 +577,7 @@ def _ragic_entry_collect_order_rows(
             elif not platform or not start_date or not end_date:
                 skip_reason = "缺少平台或起迄日期"
             else:
-                parsed_platform, _, _ = _parse_platform_region(platform)
+                parsed_platform, _, _ = _parse_platform_region(platform_for_order)
                 if parsed_platform not in ["全家", "家樂福"]:
                     skip_reason = f"平台無法產生 segment（媒體={parsed_platform}，需為全家／家樂福）"
 
@@ -590,7 +596,7 @@ def _ragic_entry_collect_order_rows(
                 continue
 
             match_key = _order_match_key(
-                platform=platform,
+                platform=platform_for_order,
                 client=order_info["client"],
                 product=order_info["product"],
                 sales=order_info["sales"],
@@ -606,7 +612,7 @@ def _ragic_entry_collect_order_rows(
                 order_no=str(order_no),
                 file_token=str(token),
                 unit_idx=i,
-                platform=platform,
+                platform=platform_for_order,
                 client=order_info["client"],
                 product=order_info["product"],
                 sales=order_info["sales"],
@@ -621,7 +627,7 @@ def _ragic_entry_collect_order_rows(
                     rid_s,
                     (
                         order_id,
-                        platform,
+                        platform_for_order,
                         order_info["client"],
                         order_info["product"],
                         order_info["sales"],
@@ -662,8 +668,8 @@ def _ragic_entry_collect_order_rows(
                 "起始日": start_date_norm,
                 "終止日": end_date_norm,
                 "走期天數": days,
-                "區域": str(u.get("region") or ""),
-                "媒體平台": platform,
+                "區域": region,
+                "媒體平台": platform_for_order,
             }
             col_order = [
                 "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
@@ -673,7 +679,7 @@ def _ragic_entry_collect_order_rows(
             row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
             state["uploaded_rows_detail"].append(f"檔#{file_i} unit#{i + 1} | {row_text}")
             state["imported_summaries"].append(
-                f"order_id={order_id} | 平台={platform} | {seconds}秒 | 代表檔次≈{spots}/日 | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
+                f"order_id={order_id} | 平台={platform_for_order} | {seconds}秒 | 代表檔次≈{spots}/日 | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
             )
 
         imported_now = len(rows_out) - rows_before
