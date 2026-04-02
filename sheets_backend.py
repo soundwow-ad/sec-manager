@@ -7,11 +7,42 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import hashlib
 import re
 from typing import Any
 import pandas as pd
+
+
+def _sheet_cell_json_safe(val: Any) -> Any:
+    """Google Sheets API 以 JSON 傳值，不可含 float nan/inf。"""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val
+    try:
+        if val is pd.NA:
+            return ""
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    try:
+        x = float(val)
+        if math.isnan(x) or math.isinf(x):
+            return ""
+        if x == int(x):
+            return int(x)
+        return x
+    except (TypeError, ValueError, OverflowError):
+        return str(val)
+
+
+def _sanitize_sheet_matrix(values: list[list[Any]]) -> list[list[Any]]:
+    return [[_sheet_cell_json_safe(c) for c in row] for row in values]
 
 # 各工作表名稱（與 DB 表對應）
 WS_ORDERS = "Orders"
@@ -420,7 +451,7 @@ def _build_template_sheet_rows(df_src: pd.DataFrame, headers: list[str], source_
 
     def put(row_vals: list[Any], key: str, val: Any) -> None:
         if key in idx:
-            row_vals[idx[key]] = "" if val is None else val
+            row_vals[idx[key]] = _sheet_cell_json_safe(val)
 
     rows_out: list[list[Any]] = []
     for _, r in df_src.iterrows():
@@ -485,8 +516,8 @@ def _write_template_style_tabs(
 
     rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders")
     rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments")
-    values_o = layout_rows + rows_o
-    values_s = layout_rows + rows_s
+    values_o = _sanitize_sheet_matrix(layout_rows + rows_o)
+    values_s = _sanitize_sheet_matrix(layout_rows + rows_s)
 
     ws_o.clear()
     ws_s.clear()
