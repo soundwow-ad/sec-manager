@@ -9,6 +9,7 @@ import io
 import json
 import os
 import hashlib
+import re
 from typing import Any
 import pandas as pd
 
@@ -19,8 +20,21 @@ WS_PLATFORM_SETTINGS = "PlatformSettings"
 WS_CAPACITY = "Capacity"
 WS_PURCHASE = "Purchase"
 WS_USERS = "Users"
+WS_T1_TEMPLATE_ORDERS = "表1樣式_Orders"
+WS_T1_TEMPLATE_SEGMENTS = "表1樣式_Segments"
 
-ALL_WORKHEET_NAMES = [WS_ORDERS, WS_SEGMENTS, WS_PLATFORM_SETTINGS, WS_CAPACITY, WS_PURCHASE, WS_USERS]
+ALL_WORKHEET_NAMES = [
+    WS_ORDERS,
+    WS_SEGMENTS,
+    WS_PLATFORM_SETTINGS,
+    WS_CAPACITY,
+    WS_PURCHASE,
+    WS_USERS,
+    WS_T1_TEMPLATE_ORDERS,
+    WS_T1_TEMPLATE_SEGMENTS,
+]
+
+TEMPLATE_SHEET_ID = "1x2cboM_xmB7nl9aA12O633BzmvPNyJnZoqPipOQhVY4"
 
 # 試算表與檔案存取權限（與 stockanalysis 一致，避免權限不足）
 SCOPES = [
@@ -266,6 +280,115 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
     if not records:
         return pd.DataFrame()
     return pd.DataFrame(records)
+
+
+def _extract_template_headers_from_google_sheet() -> list[str]:
+    """
+    從指定模板 Google Sheet 擷取「表頭列」。
+    目標：確保輸出欄位順序/名稱 100% 對齊模板。
+    """
+    url = f"https://docs.google.com/spreadsheets/d/{TEMPLATE_SHEET_ID}/export?format=csv&gid=0"
+    try:
+        df_raw = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
+    except Exception:
+        return []
+    if df_raw is None or df_raw.empty:
+        return []
+    header_row = None
+    for i in range(min(12, len(df_raw))):
+        row_vals = [str(v).strip() for v in df_raw.iloc[i].tolist()]
+        row_txt = " ".join(row_vals)
+        if "平台" in row_txt and "起始日" in row_txt and "終止日" in row_txt and "每天總檔次" in row_txt:
+            header_row = i
+            break
+    if header_row is None:
+        return []
+    headers = [str(v).strip() for v in df_raw.iloc[header_row].tolist()]
+    headers = [h if h else f"欄位_{idx+1}" for idx, h in enumerate(headers)]
+    return headers
+
+
+def _days_between(start_date: Any, end_date: Any) -> int | None:
+    try:
+        s = pd.to_datetime(start_date, errors="coerce")
+        e = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(s) or pd.isna(e):
+            return None
+        return int((e - s).days) + 1
+    except Exception:
+        return None
+
+
+def _build_template_sheet_df(df_src: pd.DataFrame, headers: list[str], source_type: str) -> pd.DataFrame:
+    if df_src is None:
+        df_src = pd.DataFrame()
+    if not headers:
+        return pd.DataFrame()
+    out_rows: list[dict[str, Any]] = []
+    for _, r in df_src.iterrows():
+        row = {h: "" for h in headers}
+        platform = r.get("platform", "")
+        company = r.get("company", "")
+        sales = r.get("sales", "")
+        client = r.get("client", "")
+        product = r.get("product", "")
+        start_date = r.get("start_date", "")
+        end_date = r.get("end_date", "")
+        seconds = r.get("seconds", "")
+        spots = r.get("spots", "")
+        amount_net = r.get("amount_net", "")
+        updated_at = r.get("updated_at", "")
+        contract_id = r.get("contract_id", "")
+        seconds_type = r.get("seconds_type", "")
+        duration_days = _days_between(start_date, end_date)
+        total_spots = ""
+        total_seconds = ""
+        if source_type == "segments":
+            total_spots = r.get("total_spots", "")
+            total_seconds = r.get("total_store_seconds", "")
+        row.update(
+            {
+                "平台": platform,
+                "公司": company,
+                "業務": sales,
+                "秒數用途": seconds_type,
+                "提交日": updated_at,
+                "HYUNDAI_CUSTIN": client,
+                "秒數": seconds,
+                "素材": product,
+                "起始日": start_date,
+                "終止日": end_date,
+                "走期天數": duration_days if duration_days is not None else "",
+                "每天總檔次": spots,
+                "委刋總檔數": total_spots,
+                "總秒數": total_seconds,
+                "合約編號": contract_id,
+                "實收金額": amount_net,
+                "除佣實收": amount_net,
+            }
+        )
+        out_rows.append(row)
+    return pd.DataFrame(out_rows, columns=headers)
+
+
+def _write_template_style_tabs(
+    *,
+    sh,
+    df_orders: pd.DataFrame,
+    df_segments: pd.DataFrame,
+) -> str | None:
+    headers = _extract_template_headers_from_google_sheet()
+    if not headers:
+        return "無法從模板試算表抓到表頭，未建立表1樣式分頁"
+
+    df_orders_t = _build_template_sheet_df(df_orders, headers, source_type="orders")
+    df_segments_t = _build_template_sheet_df(df_segments, headers, source_type="segments")
+
+    ws_o = sh.worksheet(WS_T1_TEMPLATE_ORDERS)
+    ws_s = sh.worksheet(WS_T1_TEMPLATE_SEGMENTS)
+    _update_worksheet_with_clear_when_empty(ws_o, df_orders_t, headers)
+    _update_worksheet_with_clear_when_empty(ws_s, df_segments_t, headers)
+    return None
 
 
 def _table_signature(df: pd.DataFrame) -> str:
@@ -709,12 +832,18 @@ def sync_db_to_sheets(
             (WS_PURCHASE, lambda: pd.read_sql("SELECT * FROM platform_monthly_purchase", conn), write_purchase_to_sheets),
             (WS_USERS, lambda: pd.read_sql("SELECT id, username, password_hash, role, created_at FROM users", conn), write_users_to_sheets),
         ]
+        latest_df_orders = pd.DataFrame()
+        latest_df_segments = pd.DataFrame()
         allow = set(only_tables) if only_tables else None
         for name, loader, writer in table_jobs:
             if allow is not None and name not in allow:
                 continue
             try:
                 df = loader()
+                if name == WS_ORDERS:
+                    latest_df_orders = df.copy()
+                elif name == WS_SEGMENTS:
+                    latest_df_segments = df.copy()
                 if skip_if_unchanged:
                     sig = _table_signature(df)
                     old = _last_table_signatures.get(name)
@@ -728,6 +857,25 @@ def sync_db_to_sheets(
                         _last_table_signatures[name] = _table_signature(df)
             except Exception as e:
                 errors.append(f"{name}: {e}")
+
+        # 額外輸出兩個「表1樣式」分頁（欄位對齊指定模板）。
+        # 只要本次有同步業務資料（Orders/Segments）就嘗試建立。
+        if allow is None or WS_ORDERS in allow or WS_SEGMENTS in allow:
+            try:
+                sh = _client()
+                if sh:
+                    _ensure_worksheets(sh)
+                    err = _write_template_style_tabs(
+                        sh=sh,
+                        df_orders=latest_df_orders,
+                        df_segments=latest_df_segments,
+                    )
+                    if err:
+                        errors.append(f"表1樣式分頁: {err}")
+                else:
+                    errors.append("表1樣式分頁: 未設定或未啟用 Google Sheet")
+            except Exception as e:
+                errors.append(f"表1樣式分頁: {e}")
     finally:
         conn.close()
     # 若有錯誤且 _client() 有留下具體原因，放在第一則讓使用者看到
