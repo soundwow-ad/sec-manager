@@ -20,6 +20,7 @@ def run_app_shell(
     auth_create_user,
     auth_delete_user,
     sync_sheets_if_enabled,
+    import_google_sheet_to_orders,
     import_ragic_to_orders_by_date_range,
     import_ragic_single_entry_to_orders,
     load_platform_settings,
@@ -90,6 +91,7 @@ def run_app_shell(
     role = user["role"]
 
     from ui_sidebar_account import render_sidebar_account
+    from ui_sidebar_google_import import render_sidebar_google_import
     from ui_sidebar_ragic_import import render_sidebar_ragic_import
     from ui_sidebar_admin import render_sidebar_admin
     from app_runtime_data import load_runtime_data
@@ -104,6 +106,7 @@ def run_app_shell(
         auth_create_user=auth_create_user,
         auth_delete_user=auth_delete_user,
     )
+    render_sidebar_google_import(import_google_sheet_to_orders=import_google_sheet_to_orders)
     render_sidebar_ragic_import(import_ragic_to_orders_by_date_range=import_ragic_to_orders_by_date_range)
     render_sidebar_admin(
         get_db_connection=get_db_connection,

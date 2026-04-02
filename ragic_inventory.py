@@ -559,8 +559,20 @@ def _normalize_date(val):
 
 
 def import_google_sheet_to_orders(url_or_id, replace_existing=True, merge_orders_by_contract_id: bool = False):
-    _ = (url_or_id, replace_existing, merge_orders_by_contract_id)
-    return False, "Google Sheet 匯入功能已停用（目前僅保留 Ragic 流程）"
+    from services_google_import import import_google_sheet_to_orders_service
+
+    return import_google_sheet_to_orders_service(
+        url_or_id=url_or_id,
+        replace_existing=replace_existing,
+        normalize_seconds_type=_normalize_seconds_type,
+        merge_orders_by_contract_id=merge_orders_by_contract_id,
+        init_db=init_db,
+        get_db_connection=get_db_connection,
+        load_platform_settings=load_platform_settings,
+        build_ad_flight_segments=build_ad_flight_segments,
+        compute_and_save_split_amount_for_contract=_compute_and_save_split_amount_for_contract,
+        sync_sheets_if_enabled=_sync_sheets_if_enabled,
+    )
 
 
 def build_ad_flight_segments(df_orders, custom_settings=None, write_to_db=True, sync_sheets=True):
@@ -835,6 +847,7 @@ run_app_shell(
     auth_create_user=auth_create_user,
     auth_delete_user=auth_delete_user,
     sync_sheets_if_enabled=_sync_sheets_if_enabled,
+    import_google_sheet_to_orders=import_google_sheet_to_orders,
     import_ragic_to_orders_by_date_range=import_ragic_to_orders_by_date_range,
     import_ragic_single_entry_to_orders=import_ragic_single_entry_to_orders,
     load_platform_settings=load_platform_settings,
