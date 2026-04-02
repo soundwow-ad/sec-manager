@@ -308,6 +308,43 @@ def _extract_template_headers_from_google_sheet() -> list[str]:
     return headers
 
 
+def _extract_template_layout_from_google_sheet() -> tuple[list[list[str]], list[str]]:
+    """
+    擷取模板的三列抬頭：
+    - 月份分區列
+    - 月日列
+    - 欄位列（含星期欄）
+    """
+    url = f"https://docs.google.com/spreadsheets/d/{TEMPLATE_SHEET_ID}/export?format=csv&gid=0"
+    try:
+        df_raw = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
+    except Exception:
+        return [], []
+    if df_raw is None or df_raw.empty:
+        return [], []
+
+    header_row = None
+    for i in range(min(12, len(df_raw))):
+        row_vals = [str(v).strip() for v in df_raw.iloc[i].tolist()]
+        row_txt = " ".join(row_vals)
+        if "平台" in row_txt and "起始日" in row_txt and "終止日" in row_txt and "每天總檔次" in row_txt:
+            header_row = i
+            break
+    if header_row is None:
+        return [], []
+
+    row_month = df_raw.iloc[max(0, header_row - 2)].astype(str).tolist()
+    row_day = df_raw.iloc[max(0, header_row - 1)].astype(str).tolist()
+    row_header = [str(v).strip() for v in df_raw.iloc[header_row].tolist()]
+    if not row_header:
+        return [], []
+    row_header = [h if h else f"欄位_{idx+1}" for idx, h in enumerate(row_header)]
+    ncols = len(row_header)
+    row_month = (row_month + [""] * ncols)[:ncols]
+    row_day = (row_day + [""] * ncols)[:ncols]
+    return [row_month, row_day, row_header], row_header
+
+
 def _days_between(start_date: Any, end_date: Any) -> int | None:
     try:
         s = pd.to_datetime(start_date, errors="coerce")
@@ -371,23 +408,90 @@ def _build_template_sheet_df(df_src: pd.DataFrame, headers: list[str], source_ty
     return pd.DataFrame(out_rows, columns=headers)
 
 
+def _build_template_sheet_rows(df_src: pd.DataFrame, headers: list[str], source_type: str) -> list[list[Any]]:
+    """
+    依模板欄位建立資料列（不含抬頭）。
+    """
+    if df_src is None:
+        df_src = pd.DataFrame()
+    if not headers:
+        return []
+    idx = {h: i for i, h in enumerate(headers)}
+
+    def put(row_vals: list[Any], key: str, val: Any) -> None:
+        if key in idx:
+            row_vals[idx[key]] = "" if val is None else val
+
+    rows_out: list[list[Any]] = []
+    for _, r in df_src.iterrows():
+        row_vals: list[Any] = [""] * len(headers)
+        platform = r.get("platform", "")
+        company = r.get("company", "")
+        sales = r.get("sales", "")
+        client = r.get("client", "")
+        product = r.get("product", "")
+        start_date = r.get("start_date", "")
+        end_date = r.get("end_date", "")
+        seconds = r.get("seconds", "")
+        spots = r.get("spots", "")
+        amount_net = r.get("amount_net", "")
+        updated_at = r.get("updated_at", "")
+        contract_id = r.get("contract_id", "")
+        seconds_type = r.get("seconds_type", "")
+        duration_days = _days_between(start_date, end_date)
+        total_spots = ""
+        total_seconds = ""
+        store_count = ""
+        if source_type == "segments":
+            total_spots = r.get("total_spots", "")
+            total_seconds = r.get("total_store_seconds", "")
+            store_count = r.get("store_count", "")
+
+        put(row_vals, "平台", platform)
+        put(row_vals, "公司", company)
+        put(row_vals, "業務", sales)
+        put(row_vals, "秒數用途", seconds_type)
+        put(row_vals, "提交日", updated_at)
+        put(row_vals, "HYUNDAI_CUSTIN", client)
+        put(row_vals, "秒數", seconds)
+        put(row_vals, "素材", product)
+        put(row_vals, "起始日", start_date)
+        put(row_vals, "終止日", end_date)
+        put(row_vals, "走期天數", duration_days if duration_days is not None else "")
+        put(row_vals, "每天總檔次", spots)
+        put(row_vals, "委刋總檔數", total_spots)
+        put(row_vals, "委刊總檔數", total_spots)
+        put(row_vals, "總秒數", total_seconds)
+        put(row_vals, "店數", store_count)
+        put(row_vals, "合約編號", contract_id)
+        put(row_vals, "實收金額", amount_net)
+        put(row_vals, "除佣實收", amount_net)
+        rows_out.append(row_vals)
+    return rows_out
+
+
 def _write_template_style_tabs(
     *,
     sh,
     df_orders: pd.DataFrame,
     df_segments: pd.DataFrame,
 ) -> str | None:
-    headers = _extract_template_headers_from_google_sheet()
-    if not headers:
+    layout_rows, headers = _extract_template_layout_from_google_sheet()
+    if not headers or len(layout_rows) < 3:
         return "無法從模板試算表抓到表頭，未建立表1樣式分頁"
-
-    df_orders_t = _build_template_sheet_df(df_orders, headers, source_type="orders")
-    df_segments_t = _build_template_sheet_df(df_segments, headers, source_type="segments")
 
     ws_o = sh.worksheet(WS_T1_TEMPLATE_ORDERS)
     ws_s = sh.worksheet(WS_T1_TEMPLATE_SEGMENTS)
-    _update_worksheet_with_clear_when_empty(ws_o, df_orders_t, headers)
-    _update_worksheet_with_clear_when_empty(ws_s, df_segments_t, headers)
+
+    rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders")
+    rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments")
+    values_o = layout_rows + rows_o
+    values_s = layout_rows + rows_s
+
+    ws_o.clear()
+    ws_s.clear()
+    ws_o.update(values_o, value_input_option="USER_ENTERED")
+    ws_s.update(values_s, value_input_option="USER_ENTERED")
     return None
 
 
