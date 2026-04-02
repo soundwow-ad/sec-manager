@@ -48,7 +48,10 @@ def render_table1_tab(
     # 為避免 UI 語意錯置，移除切換勾選框，直接永遠使用 Segments。
     use_segments = True
 
-    table1_default_index = 0  # 為了速度：預設先不產生日/日期欄位（更接近 1s 體感）
+    # 初始化顯示模式：管理者首次進入預設「完整」，其餘角色維持「精簡」。
+    if "table1_view_mode" not in st.session_state:
+        st.session_state["table1_view_mode"] = "完整" if role in {"行政主管", "管理者"} else "精簡"
+    table1_default_index = 2 if st.session_state.get("table1_view_mode") == "完整" else 0
     view_mode = st.radio(
         "顯示模式",
         ["精簡", "行政", "完整"],
