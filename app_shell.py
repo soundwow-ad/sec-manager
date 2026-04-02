@@ -7,7 +7,8 @@ import time
 
 import streamlit as st
 
-from services_utils import log_timing
+from services_google_import import import_google_sheet_to_orders_service
+from services_utils import log_timing, normalize_seconds_type
 
 
 def run_app_shell(
@@ -20,7 +21,6 @@ def run_app_shell(
     auth_create_user,
     auth_delete_user,
     sync_sheets_if_enabled,
-    import_google_sheet_to_orders,
     import_ragic_to_orders_by_date_range,
     import_ragic_single_entry_to_orders,
     load_platform_settings,
@@ -90,6 +90,20 @@ def run_app_shell(
     user = st.session_state["user"]
     role = user["role"]
 
+    def _import_google_sheet_to_orders(url_or_id, replace_existing=True, merge_orders_by_contract_id: bool = False):
+        return import_google_sheet_to_orders_service(
+            url_or_id=url_or_id,
+            replace_existing=replace_existing,
+            normalize_seconds_type=normalize_seconds_type,
+            merge_orders_by_contract_id=merge_orders_by_contract_id,
+            init_db=init_db,
+            get_db_connection=get_db_connection,
+            load_platform_settings=load_platform_settings,
+            build_ad_flight_segments=build_ad_flight_segments,
+            compute_and_save_split_amount_for_contract=compute_split_for_contract,
+            sync_sheets_if_enabled=sync_sheets_if_enabled,
+        )
+
     from ui_sidebar_account import render_sidebar_account
     from ui_sidebar_google_import import render_sidebar_google_import
     from ui_sidebar_ragic_import import render_sidebar_ragic_import
@@ -106,7 +120,7 @@ def run_app_shell(
         auth_create_user=auth_create_user,
         auth_delete_user=auth_delete_user,
     )
-    render_sidebar_google_import(import_google_sheet_to_orders=import_google_sheet_to_orders)
+    render_sidebar_google_import(import_google_sheet_to_orders=_import_google_sheet_to_orders)
     render_sidebar_ragic_import(import_ragic_to_orders_by_date_range=import_ragic_to_orders_by_date_range)
     render_sidebar_admin(
         get_db_connection=get_db_connection,

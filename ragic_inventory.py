@@ -847,7 +847,6 @@ run_app_shell(
     auth_create_user=auth_create_user,
     auth_delete_user=auth_delete_user,
     sync_sheets_if_enabled=_sync_sheets_if_enabled,
-    import_google_sheet_to_orders=import_google_sheet_to_orders,
     import_ragic_to_orders_by_date_range=import_ragic_to_orders_by_date_range,
     import_ragic_single_entry_to_orders=import_ragic_single_entry_to_orders,
     load_platform_settings=load_platform_settings,
