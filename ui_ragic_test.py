@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Ragic 抓取資料測試：搜尋單一案子 → 完整 Ragic 欄位展示 + CUE 解析成表1 + Excel/PDF 下載
+Ragic 抓取資料測試：搜尋單一案子 → 完整 Ragic 欄位展示 + CUE 解析成表1 + Excel/PDF 下載；
+可將多筆加入佇列後一次匯入資料庫。
 表1 呈現與主程式「📋 表1-資料」完整權限一致：同欄位順序、缺值顯示「無法判斷」/「抓不到」。
 """
 from __future__ import annotations
@@ -36,6 +37,8 @@ TABLE1_HOUR_COLUMNS = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 
 TABLE1_STAT_COLUMNS = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
 PLACEHOLDER_MISSING = "無法判斷"
 PLACEHOLDER_NOT_AVAILABLE = "抓不到"
+# 多筆 Ragic 匯入佇列（Streamlit session_state）
+_RAGIC_IMPORT_QUEUE_KEY = "_ragic_import_queue"
 
 
 def _ensure_full_table1_columns(df: pd.DataFrame, placeholder: str = PLACEHOLDER_MISSING) -> pd.DataFrame:
@@ -155,6 +158,17 @@ def _ensure_seconds_mgmt_rows(
     for name in ("秒數管理", "秒數管理(備註)", "秒數用途"):
         add_if_missing(name)
     return out
+
+
+def _entry_queue_label(entry: dict, ragic_fields: dict[str, str]) -> str:
+    """佇列顯示用：RagicId、訂檔單號、CUE（合約編號）、客戶。"""
+    rid = entry.get("_ragicId", "")
+    no = _normalize_cell(
+        _get_ragic_value_by_keys(entry, str(ragic_fields.get("訂檔單號", "") or "").strip(), "訂檔單號")
+    )
+    cue = _normalize_cell(_get_ragic_value_by_keys(entry, str(ragic_fields.get("CUE", "") or "").strip(), "CUE"))
+    client = _normalize_cell(_get_ragic_value_by_keys(entry, str(ragic_fields.get("客戶", "") or "").strip(), "客戶"))
+    return f"ID {rid} | 訂檔 {no or '—'} | CUE {cue or '（缺）'} | {client or '—'}"
 
 
 def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
@@ -586,12 +600,22 @@ def render_ragic_test_tab(
     build_table1_from_cue_excel = kwargs.get("build_table1_from_cue_excel")
     load_platform_settings = kwargs.get("load_platform_settings")
     st.markdown("### 🧪 Ragic 抓取資料測試")
-    st.caption("搜尋單一案子（訂檔單號或 Ragic ID），檢視完整 Ragic 欄位、CUE 解析成表1、並下載 Excel / PDF。")
+    st.caption(
+        "搜尋單一案子（訂檔單號或 Ragic ID），檢視完整 Ragic 欄位、CUE 解析成表1、並下載 Excel / PDF；"
+        "可將多筆加入佇列後一次匯入資料庫。"
+    )
 
     pend_single = st.session_state.pop("_ragic_single_import_detail_pending", None)
     if pend_single:
         with st.expander("上次單筆匯入詳情（Ragic 秒數管理回寫）", expanded=True):
             st.text(pend_single)
+    batch_sum = st.session_state.pop("_ragic_batch_import_summary", None)
+    batch_det = st.session_state.pop("_ragic_batch_import_detail", None)
+    if batch_sum:
+        st.success(batch_sum)
+    if batch_det:
+        with st.expander("上次批次匯入詳情", expanded=False):
+            st.text(batch_det)
 
     default_url = "https://ap13.ragic.com/soundwow/forms12/17"
     ragic_url = st.text_input("訂檔表單網址", value=default_url, help="Ragic 表單 URL")
@@ -700,6 +724,103 @@ def render_ragic_test_tab(
             del st.session_state["_ragic_search_results"]
             st.rerun()
 
+    # ---------- 多筆匯入佇列（可累積後一次匯入；不依賴是否已載入下方詳情）----------
+    if import_ragic_single_entry_to_orders:
+        st.markdown("---")
+        st.markdown("##### 📋 多筆匯入佇列")
+        st.caption(
+            "載入案子後按下方「加入多筆匯入佇列」累積筆數；在此檢視、移除項目，最後按「一次匯入佇列內全部」。"
+            " 每筆會獨立執行與「單筆匯入」相同流程（下載 CUE、解析、寫入 orders/segments、回寫秒數管理）。"
+        )
+        if _RAGIC_IMPORT_QUEUE_KEY not in st.session_state:
+            st.session_state[_RAGIC_IMPORT_QUEUE_KEY] = []
+        queue: list[dict] = st.session_state[_RAGIC_IMPORT_QUEUE_KEY]
+        if queue:
+            st.text(f"目前佇列：**{len(queue)}** 筆")
+            to_remove: Any = None
+            for item in queue:
+                c_a, c_b = st.columns([6, 1])
+                with c_a:
+                    st.text(item.get("label") or str(item.get("ragic_id")))
+                with c_b:
+                    if st.button("移除", key=f"ragic_q_rm_{item.get('ragic_id')}"):
+                        to_remove = item.get("ragic_id")
+            if to_remove is not None:
+                st.session_state[_RAGIC_IMPORT_QUEUE_KEY] = [x for x in queue if x.get("ragic_id") != to_remove]
+                st.rerun()
+            bc1, bc2, bc3 = st.columns([1, 1, 2])
+            with bc1:
+                if st.button("清空佇列", key="ragic_q_clear_all"):
+                    st.session_state[_RAGIC_IMPORT_QUEUE_KEY] = []
+                    st.rerun()
+            with bc2:
+                st.checkbox("匯入成功後自佇列移除", value=True, key="ragic_q_remove_on_success")
+            with bc3:
+                if st.button("🚀 一次匯入佇列內全部", type="primary", key="ragic_q_import_all"):
+                    api_k = (api_key_input or api_key or "").strip()
+                    url_s = (ragic_url or "").strip()
+                    if not api_k:
+                        st.error("請輸入 Ragic API Key。")
+                        st.stop()
+                    if not url_s:
+                        st.error("請填訂檔表單網址。")
+                        st.stop()
+                    remove_on_ok = bool(st.session_state.get("ragic_q_remove_on_success", True))
+                    work = list(queue)
+                    ok_n = 0
+                    fail_n = 0
+                    report_chunks: list[str] = []
+                    new_queue: list[dict] = []
+                    prog = st.progress(0.0)
+                    status_box = st.empty()
+                    total = len(work)
+                    for i, item in enumerate(work, start=1):
+                        rid_i = item.get("ragic_id")
+                        lbl = str(item.get("label") or rid_i)[:80]
+                        status_box.info(f"({i}/{total}) 匯入 RagicId = {rid_i} …")
+                        prog.progress(min(1.0, (i - 1) / max(total, 1)))
+
+                        def _pcb(ev: dict, *, _lbl=lbl, _ii=i, _tt=total) -> None:
+                            m = str(ev.get("message") or "").strip()
+                            status_box.info(f"[{_ii}/{_tt}] {_lbl} — {m}" if m else f"[{_ii}/{_tt}] {_lbl}")
+
+                        try:
+                            ok, msg, batch_id, detail_report = import_ragic_single_entry_to_orders(
+                                ragic_url=url_s,
+                                api_key=api_k,
+                                ragic_id=rid_i,
+                                replace_existing=False,
+                                progress_cb=_pcb,
+                            )
+                        except Exception as ex:
+                            ok, msg, batch_id, detail_report = False, str(ex), "", ""
+
+                        chunk = (
+                            f"======== RagicId {rid_i} ========\n"
+                            f"結果：{'成功' if ok else '失敗'}\n{msg or ''}\n"
+                            f"batch_id：{batch_id or '—'}\n"
+                        )
+                        if detail_report and str(detail_report).strip():
+                            chunk += str(detail_report).strip()[:12000] + ("\n…(截斷)" if len(str(detail_report)) > 12000 else "")
+                        report_chunks.append(chunk)
+
+                        if ok:
+                            ok_n += 1
+                            if not remove_on_ok:
+                                new_queue.append(item)
+                        else:
+                            fail_n += 1
+                            new_queue.append(item)
+
+                    prog.progress(1.0)
+                    status_box.empty()
+                    st.session_state[_RAGIC_IMPORT_QUEUE_KEY] = new_queue
+                    st.session_state["_ragic_batch_import_summary"] = (
+                        f"批次匯入完成：成功 {ok_n} 筆、失敗 {fail_n} 筆；佇列剩餘 {len(new_queue)} 筆。"
+                    )
+                    st.session_state["_ragic_batch_import_detail"] = "\n\n".join(report_chunks)
+                    st.rerun()
+
     # 顯示已載入的單筆
     entry = st.session_state.get("_ragic_last_entry")
     if not entry or not isinstance(entry, dict):
@@ -725,7 +846,28 @@ def render_ragic_test_tab(
         st.caption("可將這筆單一 Ragic 案子匯入至 `orders` / `segments`（無法產生 segment 的列會被略過並寫入匯入紀錄）。")
         st.caption("匯入策略：不清空舊資料，僅新增/更新有變動的列。")
         api_key_use = api_key_input or api_key
-        if st.button("📥 匯入此單筆到資料庫", type="primary", key="ragic_import_single_btn") and (str(ragic_url or "").strip()):
+        row_imp = st.columns([1, 1])
+        with row_imp[0]:
+            single_clicked = st.button("📥 匯入此單筆到資料庫", type="primary", key="ragic_import_single_btn")
+        with row_imp[1]:
+            add_q_clicked = st.button("➕ 加入多筆匯入佇列", key="ragic_add_to_import_queue")
+        if add_q_clicked:
+            rid_q = entry.get("_ragicId")
+            if rid_q is None or str(rid_q).strip() == "":
+                st.error("目前案子沒有有效的 Ragic ID，無法加入佇列。")
+            else:
+                try:
+                    rid_int = int(rid_q)
+                except (TypeError, ValueError):
+                    rid_int = rid_q
+                qlist = st.session_state.setdefault(_RAGIC_IMPORT_QUEUE_KEY, [])
+                if any(str(x.get("ragic_id")) == str(rid_int) for x in qlist):
+                    st.warning("此 Ragic ID 已在佇列中。")
+                else:
+                    qlist.append({"ragic_id": rid_int, "label": _entry_queue_label(entry, ragic_fields)})
+                    st.success(f"已加入佇列（共 {len(qlist)} 筆）。")
+                    st.rerun()
+        if single_clicked and (str(ragic_url or "").strip()):
             if not api_key_use or not str(api_key_use).strip():
                 st.error("請輸入 Ragic API Key。")
                 st.stop()
