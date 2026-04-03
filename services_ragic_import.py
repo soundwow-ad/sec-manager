@@ -249,6 +249,35 @@ def _parse_seconds_from_material_title(text: str) -> int | None:
     return None
 
 
+def _fallback_material_title_from_row_values(row: dict) -> str:
+    """
+    Ragic 子表列常僅以流水號為 key（畫面才對應到「廣告篇名」）。
+    從列上所有字串值中，挑最像「篇名」者：含 數字+秒 或 [數字]，且優先排除 .mp3 檔名。
+    """
+    if not isinstance(row, dict):
+        return ""
+    candidates: list[tuple[int, str]] = []
+    for v in row.values():
+        if not isinstance(v, str):
+            continue
+        s = v.strip()
+        if not s or s.lower() == "nan":
+            continue
+        if not re.search(r"\d+\s*秒", s) and not re.search(r"\[\d+\]", s):
+            continue
+        score = 3 if re.search(r"\d+\s*秒", s) else 1
+        if s.lower().endswith(".mp3"):
+            score -= 2
+        if "@" in s and s.lower().endswith(".mp3"):
+            score -= 2
+        candidates.append((score, s))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+    best_score, best_s = candidates[0]
+    return best_s if best_score > 0 else ""
+
+
 def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str:
     """單一子表列：優先廣告篇名（再檔名／流水號），避免誤用主表產品名。"""
     if not isinstance(row, dict):
@@ -267,17 +296,18 @@ def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str
         return str(row.get(str(fid_ad_name))).strip()
     if _ok(row.get("1015381")):
         return str(row.get("1015381")).strip()
-    return ""
+    # 子表欄位若全為數字 key，改由字串型態猜篇名（與「素材音檔」.mp3 區隔）
+    return _fallback_material_title_from_row_values(row)
 
 
 def _collect_ragic_lists_of_dicts(node: object, bucket: list[list], seen_ids: set[int]) -> None:
-    """遞迴掃描 Ragic entry（含巢狀子表），收集「元素皆為 dict 的 list」且去重。"""
+    """遞迴掃描 Ragic entry（含巢狀子表），收集「含至少一筆 dict 列」的 list（Ragic 偶有空列／非 dict 占位）。"""
     if isinstance(node, dict):
         for v in node.values():
             _collect_ragic_lists_of_dicts(v, bucket, seen_ids)
         return
     if isinstance(node, list):
-        if node and all(isinstance(x, dict) for x in node):
+        if node and any(isinstance(x, dict) for x in node):
             lid = id(node)
             if lid not in seen_ids:
                 seen_ids.add(lid)
@@ -289,14 +319,16 @@ def _collect_ragic_lists_of_dicts(node: object, bucket: list[list], seen_ids: se
 
 def _ragic_subtable_list_smells_material(lst: list) -> bool:
     """辨識「訂檔素材」子表，避免誤用收入等其他子表。"""
-    if not lst or not isinstance(lst[0], dict):
+    if not lst:
         return False
-    hint_keys = frozenset({"廣告篇名", "廣告檔名", "素材音檔", "素材檔名", "1015381", "1015380"})
+    hint_keys = frozenset({"廣告篇名", "廣告檔名", "素材音檔", "素材檔名", "1015381", "1015380", "1015382"})
     for r in lst:
         if not isinstance(r, dict):
             continue
         ks = {str(k) for k in r.keys()}
         if ks & hint_keys:
+            return True
+        if _material_title_from_subtable_row(r, None) or _fallback_material_title_from_row_values(r):
             return True
     return False
 
