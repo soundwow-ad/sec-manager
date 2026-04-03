@@ -388,8 +388,8 @@ def process_excel_file(excel_path, ragic_data, field_map):
             results.append({
                 '檔案名稱': excel_path.name,
                 '訂單ID': order_info.get('order_id', '未知'),
-                '客戶': order_info.get('client', '未知'),
-                '產品': order_info.get('product', '未知'),
+                '客戶名稱': order_info.get('client', '未知'),
+                '素材': order_info.get('product', '未知'),
                 '平台': order_info.get('platform', '未知'),
                 '目標秒數': target_seconds or 0,
                 '目標檔次': target_spots or 0,
@@ -449,8 +449,8 @@ def process_excel_file(excel_path, ragic_data, field_map):
         results.append({
             '檔案名稱': excel_path.name,
             '訂單ID': order_info.get('order_id', '未知'),
-            '客戶': order_info.get('client', '未知'),
-            '產品': order_info.get('product', '未知'),
+            '客戶名稱': order_info.get('client', '未知'),
+            '素材': order_info.get('product', '未知'),
             '平台': order_info.get('platform', '未知'),
             '目標秒數': target_seconds,
             '目標檔次': target_spots,
@@ -466,8 +466,8 @@ def process_excel_file(excel_path, ragic_data, field_map):
         results.append({
             '檔案名稱': excel_path.name,
             '訂單ID': '錯誤',
-            '客戶': '錯誤',
-            '產品': '錯誤',
+            '客戶名稱': '錯誤',
+            '素材': '錯誤',
             '平台': '錯誤',
             '目標秒數': 0,
             '目標檔次': 0,

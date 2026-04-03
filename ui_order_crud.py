@@ -54,7 +54,7 @@ def render_order_crud_panel(
             new_contract_id = st.text_input("所屬合約編號（選填）", key="crud_new_contract_id", placeholder="同合約多列填相同值")
             new_platform = st.selectbox("平台", list(mock_platform_raw), key="crud_new_platform")
             new_client = st.text_input("客戶", key="crud_new_client", value="")
-            new_product = st.text_input("產品名稱", key="crud_new_product", value="")
+            new_product = st.text_input("素材", key="crud_new_product", value="")
             new_sales = st.selectbox("業務", list(mock_sales), key="crud_new_sales")
             new_company = st.selectbox("公司", list(mock_company), key="crud_new_company")
             new_seconds_type = st.selectbox("秒數用途", list(seconds_usage_types), key="crud_new_seconds_type")
@@ -82,7 +82,7 @@ def render_order_crud_panel(
             )
         if st.button("💾 儲存新增", key="crud_btn_add"):
             if not new_id or not new_client or not new_product:
-                st.error("請填寫訂單 ID、客戶、產品名稱")
+                st.error("請填寫訂單 ID、客戶、素材")
             else:
                 conn_chk = get_db_connection()
                 exists = conn_chk.execute("SELECT 1 FROM orders WHERE id=? LIMIT 1", (new_id,)).fetchone() is not None
@@ -153,7 +153,7 @@ def render_order_crud_panel(
                     )
                     edit_platform = st.selectbox("平台", list(mock_platform_raw), index=_idx(list(mock_platform_raw), selected_row.get("platform")), key="crud_edit_platform")
                     edit_client = st.text_input("客戶", value=selected_row.get("client", "") or "", key="crud_edit_client")
-                    edit_product = st.text_input("產品名稱", value=selected_row.get("product", "") or "", key="crud_edit_product")
+                    edit_product = st.text_input("素材", value=selected_row.get("product", "") or "", key="crud_edit_product")
                     edit_sales = st.selectbox("業務", list(mock_sales), index=_idx(list(mock_sales), selected_row.get("sales")), key="crud_edit_sales")
                     edit_company = st.selectbox("公司", list(mock_company), index=_idx(list(mock_company), selected_row.get("company")), key="crud_edit_company")
                     edit_seconds_type = st.selectbox(
@@ -243,7 +243,7 @@ def render_order_crud_panel(
 
     q1, q2, q3 = st.columns([2, 1, 1])
     with q1:
-        crud_kw = st.text_input("搜尋（ID / 合約 / 客戶 / 產品 / 平台）", key="crud_kw", placeholder="輸入關鍵字")
+        crud_kw = st.text_input("搜尋（ID / 合約 / 客戶 / 素材 / 平台）", key="crud_kw", placeholder="輸入關鍵字")
     with q2:
         page_size = st.selectbox("每頁筆數", options=[20, 50, 100, 200, 500], index=1, key="crud_page_size")
     with q3:

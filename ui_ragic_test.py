@@ -23,6 +23,7 @@ from ragic_client import (
     parse_file_tokens,
     parse_sheet_url,
 )
+from services_ragic_import import _ragic_material_display_string
 
 
 # 與主程式 表1-資料 完整欄位順序一致（不含動態日期欄）
@@ -164,9 +165,13 @@ def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
             return _normalize_cell(entry.get(fid))
         return _normalize_cell(entry.get(name, ""))
 
+    # 素材欄：優先子表「廣告篇名」等（與正式 Ragic 匯入一致），勿用主表「產品名稱」當素材
+    mat = _ragic_material_display_string(entry, ragic_fields)
+    product = mat or g("產品名稱")
+
     return {
         "client": g("客戶"),
-        "product": g("產品名稱"),
+        "product": product,
         "sales": g("業務(開發客戶)"),
         "company": g("公司"),
         "order_id": g("訂檔單號"),

@@ -135,7 +135,7 @@ def render_table3_tab(
                                 target_d = pd.Timestamp(sel_year, sel_month, day)
                                 dd = df_daily_t3[(df_daily_t3["媒體平台"] == mp) & (df_daily_t3["日期"].dt.normalize() == target_d)]
                                 if not dd.empty:
-                                    show_cols = [c for c in ["日期", "媒體平台", "公司", "業務", "客戶", "產品", "使用店秒", "秒數", "檔次"] if c in dd.columns]
+                                    show_cols = [c for c in ["日期", "媒體平台", "公司", "業務", "客戶名稱", "素材", "使用店秒", "秒數", "檔次"] if c in dd.columns]
                                     dd_show = dd[show_cols] if show_cols else dd
                                     st.dataframe(styler_one_decimal(dd_show), use_container_width=True, height=min(200, 80 + len(dd) * 38))
                                 else:

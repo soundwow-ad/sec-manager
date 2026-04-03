@@ -249,61 +249,83 @@ def _parse_seconds_from_material_title(text: str) -> int | None:
     return None
 
 
+def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str:
+    """單一子表列：優先廣告篇名（再檔名／流水號），避免誤用主表產品名。"""
+    if not isinstance(row, dict):
+        return ""
+
+    def _ok(v) -> bool:
+        if v is None:
+            return False
+        s = str(v).strip()
+        return bool(s) and s.lower() != "nan"
+
+    for cn in ("廣告篇名", "廣告檔名", "素材檔名", "檔名", "素材"):
+        if _ok(row.get(cn)):
+            return str(row.get(cn)).strip()
+    if fid_ad_name and _ok(row.get(str(fid_ad_name))):
+        return str(row.get(str(fid_ad_name))).strip()
+    if _ok(row.get("1015381")):
+        return str(row.get("1015381")).strip()
+    return ""
+
+
 def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) -> list[tuple[str, int | None]]:
     """Ragic 子表 素材_廣告檔名：回傳 (篇名, 從篇名解析的秒數或 None)。"""
     out: list[tuple[str, int | None]] = []
     if not entry or not isinstance(entry, dict):
         return out
-    keys_try: list[str] = []
+
+    def _parse_list(val: list) -> list[tuple[str, int | None]]:
+        acc: list[tuple[str, int | None]] = []
+        for row in val:
+            if not isinstance(row, dict):
+                continue
+            title = _material_title_from_subtable_row(row, fid_ad_name)
+            ps = _parse_seconds_from_material_title(title) if title else None
+            acc.append((title, ps))
+        return acc
+
     if fid_ad_name:
-        keys_try.append(str(fid_ad_name))
-    keys_try.extend(["1015381", "廣告檔名", "廣告篇名", "素材檔名", "檔名"])
+        direct = entry.get(str(fid_ad_name))
+        if isinstance(direct, list) and direct and isinstance(direct[0], dict):
+            tmp = _parse_list(direct)
+            if any(str(t).strip() for t, _ in tmp):
+                return tmp
 
     for val in entry.values():
         if not isinstance(val, list) or not val:
             continue
-        first = val[0]
-        if not isinstance(first, dict):
+        if not isinstance(val[0], dict):
             continue
-        sample_hit = False
-        for row in val:
-            if not isinstance(row, dict):
-                continue
-            title = ""
-            for k in keys_try:
-                cell = row.get(k)
-                if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
-                    title = str(cell).strip()
-                    break
-            if not title:
-                for cn in ("廣告檔名", "廣告篇名", "素材", "檔名"):
-                    cell = row.get(cn)
-                    if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
-                        title = str(cell).strip()
-                        break
-            if title:
-                sample_hit = True
-                break
+        sample_hit = any(_material_title_from_subtable_row(r, fid_ad_name) for r in val if isinstance(r, dict))
         if not sample_hit:
             continue
         for row in val:
             if not isinstance(row, dict):
                 continue
-            title = ""
-            for k in keys_try:
-                cell = row.get(k)
-                if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
-                    title = str(cell).strip()
-                    break
-            if not title:
-                for cn in ("廣告檔名", "廣告篇名", "素材", "檔名"):
-                    cell = row.get(cn)
-                    if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
-                        title = str(cell).strip()
-                        break
+            title = _material_title_from_subtable_row(row, fid_ad_name)
             ps = _parse_seconds_from_material_title(title) if title else None
             out.append((title, ps))
     return out
+
+
+def _ragic_material_display_string(entry: dict, ragic_fields: dict | None) -> str:
+    """
+    供 Ragic 測試頁／order_info：從子表彙整素材篇名（去重、分號連接）。
+    ragic_fields 須含「素材_廣告檔名」流水號（與 config 一致）。
+    """
+    st = dict(ragic_fields or {})
+    fid = st.get("素材_廣告檔名") or st.get("廣告檔名")
+    rows = _extract_ragic_material_filename_rows(entry, str(fid) if fid else None)
+    titles: list[str] = []
+    seen: set[str] = set()
+    for t, _ in rows:
+        s = str(t).strip()
+        if s and s not in seen:
+            seen.add(s)
+            titles.append(s)
+    return "；".join(titles)
 
 
 def _material_titles_for_unit_seconds(rows: list[tuple[str, int | None]], unit_seconds: int) -> list[str]:
@@ -628,9 +650,14 @@ def _ragic_entry_collect_order_rows(
     rid_s = str(ragic_id)
     order_no = _ragic_get_field(entry, "訂檔單號", ragic_fields) or f"ragic_{ragic_id}"
     order_no = str(order_no)
+    merged_for_material = dict(ragic_fields or {})
+    if ragic_subtable_fields:
+        merged_for_material.update(ragic_subtable_fields)
+    mat_for_merge = _ragic_material_display_string(entry, merged_for_material)
+    product_merge = mat_for_merge or str(_ragic_get_field(entry, "產品名稱", ragic_fields) or "")
     order_info = {
         "client": str(_ragic_get_field(entry, "客戶", ragic_fields) or ""),
-        "product": str(_ragic_get_field(entry, "產品名稱", ragic_fields) or ""),
+        "product": product_merge,
         "sales": str(_ragic_get_field(entry, "業務(開發客戶)", ragic_fields) or ""),
         "company": str(_ragic_get_field(entry, "公司", ragic_fields) or ""),
         "order_id": str(order_no),
