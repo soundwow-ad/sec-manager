@@ -270,6 +270,37 @@ def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str
     return ""
 
 
+def _collect_ragic_lists_of_dicts(node: object, bucket: list[list], seen_ids: set[int]) -> None:
+    """遞迴掃描 Ragic entry（含巢狀子表），收集「元素皆為 dict 的 list」且去重。"""
+    if isinstance(node, dict):
+        for v in node.values():
+            _collect_ragic_lists_of_dicts(v, bucket, seen_ids)
+        return
+    if isinstance(node, list):
+        if node and all(isinstance(x, dict) for x in node):
+            lid = id(node)
+            if lid not in seen_ids:
+                seen_ids.add(lid)
+                bucket.append(node)
+        for x in node:
+            if isinstance(x, (dict, list)):
+                _collect_ragic_lists_of_dicts(x, bucket, seen_ids)
+
+
+def _ragic_subtable_list_smells_material(lst: list) -> bool:
+    """辨識「訂檔素材」子表，避免誤用收入等其他子表。"""
+    if not lst or not isinstance(lst[0], dict):
+        return False
+    hint_keys = frozenset({"廣告篇名", "廣告檔名", "素材音檔", "素材檔名", "1015381", "1015380"})
+    for r in lst:
+        if not isinstance(r, dict):
+            continue
+        ks = {str(k) for k in r.keys()}
+        if ks & hint_keys:
+            return True
+    return False
+
+
 def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) -> list[tuple[str, int | None]]:
     """Ragic 子表 素材_廣告檔名：回傳 (篇名, 從篇名解析的秒數或 None)。"""
     out: list[tuple[str, int | None]] = []
@@ -293,10 +324,15 @@ def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) 
             if any(str(t).strip() for t, _ in tmp):
                 return tmp
 
-    for val in entry.values():
-        if not isinstance(val, list) or not val:
-            continue
-        if not isinstance(val[0], dict):
+    all_lists: list[list] = []
+    _collect_ragic_lists_of_dicts(entry, all_lists, set())
+
+    material_lists = [L for L in all_lists if _ragic_subtable_list_smells_material(L)]
+    if not material_lists:
+        material_lists = list(all_lists)
+
+    for val in material_lists:
+        if not val or not isinstance(val[0], dict):
             continue
         sample_hit = any(_material_title_from_subtable_row(r, fid_ad_name) for r in val if isinstance(r, dict))
         if not sample_hit:
