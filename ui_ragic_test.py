@@ -729,12 +729,24 @@ def render_ragic_test_tab(
             if not api_key_use or not str(api_key_use).strip():
                 st.error("請輸入 Ragic API Key。")
                 st.stop()
-            with st.spinner("正在匯入（抓取附檔、解析 CUE、寫入 orders/segments）..."):
+            with st.status("Ragic 單筆匯入進行中…（大檔解析或 Google 同步可能需一至數分鐘）", expanded=True) as _imp_status:
+
+                def _import_progress(ev: dict) -> None:
+                    m = str(ev.get("message") or "").strip()
+                    if m:
+                        _imp_status.update(label=m, state="running")
+
                 ok, msg, batch_id, detail_report = import_ragic_single_entry_to_orders(
                     ragic_url=ragic_url.strip(),
                     api_key=str(api_key_use).strip(),
                     ragic_id=rid,
                     replace_existing=False,
+                    progress_cb=_import_progress,
+                )
+                tail = (msg or "匯入結束")[:280]
+                _imp_status.update(
+                    label=("✅ " if ok else "❌ ") + tail,
+                    state="complete",
                 )
             if detail_report and str(detail_report).strip():
                 st.session_state["_ragic_single_import_detail_pending"] = detail_report

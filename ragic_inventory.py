@@ -523,6 +523,7 @@ def import_ragic_single_entry_to_orders(
     api_key: str,
     ragic_id: str | int,
     replace_existing: bool = False,
+    progress_cb=None,
 ):
     from services_ragic_import import import_ragic_single_entry_to_orders_service
 
@@ -541,6 +542,7 @@ def import_ragic_single_entry_to_orders(
         compute_and_save_split_amount_for_contract=_compute_and_save_split_amount_for_contract,
         sync_sheets_if_enabled=_sync_sheets_if_enabled,
         normalize_date=_normalize_date,
+        progress_cb=progress_cb,
     )
 
 

@@ -1883,6 +1883,11 @@ def parse_cue_excel_for_table1(
     cue_parse_diagnostics: list | None = None,
     cue_layout_sections: list | None = None,
     cue_structural_reports: list | None = None,
+    *,
+    fallback_max_sheets: int = 16,
+    fallback_max_rows_per_sheet: int = 5000,
+    layout_preview_max_sheets: int = 8,
+    layout_preview_nrows: int = 120,
 ):
     result = []
     try:
@@ -1911,10 +1916,21 @@ def parse_cue_excel_for_table1(
             try:
                 bio = io.BytesIO(file_content)
                 x2 = pd.ExcelFile(bio, engine="openpyxl")
-                for sn in x2.sheet_names:
+                preview_sheets = x2.sheet_names[: max(1, int(layout_preview_max_sheets))]
+                for sn in preview_sheets:
                     bio.seek(0)
-                    df0 = pd.read_excel(bio, sheet_name=sn, header=None, engine="openpyxl")
+                    df0 = pd.read_excel(
+                        bio,
+                        sheet_name=sn,
+                        header=None,
+                        engine="openpyxl",
+                        nrows=max(1, int(layout_preview_nrows)),
+                    )
                     cue_layout_sections.append(format_cue_sheet_matrix_for_report(df0, sn))
+                if len(x2.sheet_names) > len(preview_sheets):
+                    cue_layout_sections.append(
+                        f"（尚有 {len(x2.sheet_names) - len(preview_sheets)} 個工作表未輸出版面預覽，以避免匯入卡太久）"
+                    )
                 try:
                     x2.close()
                 except Exception:
@@ -1925,10 +1941,22 @@ def parse_cue_excel_for_table1(
         excel_file = io.BytesIO(file_content)
         excel_file.seek(0)
         xls = pd.ExcelFile(excel_file, engine="openpyxl")
+        sheet_names_cap = xls.sheet_names[: max(1, int(fallback_max_sheets))]
+        if len(xls.sheet_names) > len(sheet_names_cap):
+            if cue_parse_diagnostics is not None:
+                cue_parse_diagnostics.append(
+                    f"備援解析僅處理前 {len(sheet_names_cap)} 個工作表（共 {len(xls.sheet_names)} 個），避免超大型活頁簿卡住匯入"
+                )
 
-        for sheet_name in xls.sheet_names:
+        for sheet_name in sheet_names_cap:
             try:
-                df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None, engine="openpyxl")
+                df = pd.read_excel(
+                    excel_file,
+                    sheet_name=sheet_name,
+                    header=None,
+                    engine="openpyxl",
+                    nrows=max(1, int(fallback_max_rows_per_sheet)),
+                )
                 df = df.loc[:, ~df.isna().all()]
                 sheet_date_range = _parse_sheet_date_range(sheet_name)
                 platform_info = _extract_platform_from_sheet(df, sheet_name)

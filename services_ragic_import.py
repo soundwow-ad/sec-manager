@@ -687,6 +687,7 @@ def _push_seconds_mgmt_to_ragic(
     entry_outcomes: dict[str, dict],
     batch_id: str,
     extra_seconds_notes: dict[str, list[str]] | None = None,
+    prefetched_entries: dict[str, dict] | None = None,
 ) -> str:
     from ragic_client import post_update_entry_fields, make_single_record_url, get_json
 
@@ -695,6 +696,7 @@ def _push_seconds_mgmt_to_ragic(
     if not fid_flag or not fid_note:
         return "（config 未設定 秒數管理／秒數管理(備註) 流水號，已略過 Ragic 回寫）\n"
 
+    prefetch = prefetched_entries or {}
     extra = extra_seconds_notes or {}
     report_lines: list[str] = ["", "—— Ragic 秒數管理欄位回寫 ——"]
     for rid, state in sorted(entry_outcomes.items(), key=lambda x: x[0]):
@@ -704,19 +706,31 @@ def _push_seconds_mgmt_to_ragic(
         remark = _compose_seconds_mgmt_remark(state=st, batch_id=batch_id, seconds_type_notes=merged_notes)
         # 保留舊備註中人工更新過的「Segments 秒數用途更新紀錄」
         old_note = ""
-        try:
-            one_url = make_single_record_url(ref, rid)
-            payload, err = get_json(one_url, api_key, timeout=60)
-            if not err and isinstance(payload, dict):
-                entry_obj = payload.get(str(rid)) if isinstance(payload.get(str(rid)), dict) else payload
-                if isinstance(entry_obj, dict):
-                    old_note = str(
-                        _ragic_get_field(entry_obj, "秒數管理(備註)", ragic_fields)
-                        or entry_obj.get(str(fid_note))
-                        or ""
-                    )
-        except Exception:
-            old_note = ""
+        rid_key = str(rid)
+        pref = prefetch.get(rid_key)
+        if isinstance(pref, dict):
+            try:
+                old_note = str(
+                    _ragic_get_field(pref, "秒數管理(備註)", ragic_fields)
+                    or pref.get(str(fid_note))
+                    or ""
+                )
+            except Exception:
+                old_note = ""
+        else:
+            try:
+                one_url = make_single_record_url(ref, rid)
+                payload, err = get_json(one_url, api_key, timeout=60)
+                if not err and isinstance(payload, dict):
+                    entry_obj = payload.get(str(rid)) if isinstance(payload.get(str(rid)), dict) else payload
+                    if isinstance(entry_obj, dict):
+                        old_note = str(
+                            _ragic_get_field(entry_obj, "秒數管理(備註)", ragic_fields)
+                            or entry_obj.get(str(fid_note))
+                            or ""
+                        )
+            except Exception:
+                old_note = ""
         # 只保留最後一段 Segments 秒數用途更新紀錄，避免備註無限膨脹。
         latest_block = _extract_latest_segments_seconds_type_block(old_note)
         if latest_block:
@@ -1553,6 +1567,7 @@ def import_ragic_single_entry_to_orders_service(
     compute_and_save_split_amount_for_contract: Callable[[str], None],
     sync_sheets_if_enabled: Callable[..., None],
     normalize_date: Callable[[str], str],
+    progress_cb: Callable[[dict], None] | None = None,
 ) -> tuple[bool, str, str, str]:
     batch_id = f"ragic_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="info", phase="summary", message=f"開始匯入：單筆 ragic_id={ragic_id}")
@@ -1603,6 +1618,16 @@ def import_ragic_single_entry_to_orders_service(
         return False, f"抓取例外：{e}", batch_id, ""
 
     ragic_id_str = str(ragic_id)
+    prefetch_for_push = {str(entry.get("_ragicId", ragic_id)): entry}
+    if progress_cb:
+        progress_cb(
+            {
+                "stage": "cue_collect",
+                "message": (
+                    f"RagicId {ragic_id_str}：下載 CUE 附檔並解析 Excel（檔案大或網路慢時可能需一至數分鐘，並非當機）…"
+                ),
+            }
+        )
     existing_order_id_map = _load_existing_order_id_map(get_db_connection)
     staged_rows, state = _ragic_entry_collect_order_rows(
         entry,
@@ -1618,6 +1643,7 @@ def import_ragic_single_entry_to_orders_service(
         max_files=max_files_per_entry,
         submit_date_display=submit_date_display,
         submit_at_sql=submit_at_sql,
+        progress_cb=progress_cb,
     )
     entry_outcomes = {state["ragic_id"]: state}
     order_rows = [p[1] for p in staged_rows]
@@ -1636,12 +1662,20 @@ def import_ragic_single_entry_to_orders_service(
 
     if not order_rows:
         _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="failed", phase="summary", message="無可匯入訂單（皆未通過可產生 segment 條件）")
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "ragic_push_seconds",
+                    "message": f"RagicId {ragic_id_str}：寫回「秒數管理／備註」至 Ragic（約數十秒內應完成）…",
+                }
+            )
         push_detail = _push_seconds_mgmt_to_ragic(
             ref=ref,
             api_key=api_key,
             ragic_fields=ragic_fields,
             entry_outcomes=entry_outcomes,
             batch_id=batch_id,
+            prefetched_entries=prefetch_for_push,
         )
         return False, "此筆 Ragic 沒有可匯入的有效資料（皆未通過可產生 segment 條件）。", batch_id, push_detail
 
@@ -1748,6 +1782,13 @@ def import_ragic_single_entry_to_orders_service(
         )
         conn.commit()
         conn.close()
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "segments",
+                    "message": f"RagicId {ragic_id_str}：重算 segments／拆帳（orders 多時會稍久）…",
+                }
+            )
         conn_read = get_db_connection()
         df_orders = pd.read_sql("SELECT * FROM orders", conn_read)
         conn_read.close()
@@ -1766,6 +1807,13 @@ def import_ragic_single_entry_to_orders_service(
             if cid:
                 compute_and_save_split_amount_for_contract(str(cid))
         # Ragic 匯入後強制即時同步，避免重啟時本機/雲端快照不一致。
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "sync_sheets",
+                    "message": f"RagicId {ragic_id_str}：同步 Google 試算表（網路慢時可能超過一分鐘）…",
+                }
+            )
         sync_sheets_if_enabled(only_tables=["Orders", "Segments"], skip_if_unchanged=False)
         _log_ragic_import(
             get_db_connection=get_db_connection,
@@ -1778,12 +1826,20 @@ def import_ragic_single_entry_to_orders_service(
                 f"inserted={inserted_count} updated={updated_count} skipped={skipped_count}"
             ),
         )
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "ragic_push_seconds",
+                    "message": f"RagicId {ragic_id_str}：寫回「秒數管理／備註」至 Ragic…",
+                }
+            )
         push_detail = _push_seconds_mgmt_to_ragic(
             ref=ref,
             api_key=api_key,
             ragic_fields=ragic_fields,
             entry_outcomes=entry_outcomes,
             batch_id=batch_id,
+            prefetched_entries=prefetch_for_push,
         )
         summary_lines = [
             f"【本機 DB】寫入 {len(order_rows)} 筆 orders；新增 {inserted_count}、更新 {updated_count}、略過（無變更）{skipped_count}。",
