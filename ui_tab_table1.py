@@ -139,7 +139,16 @@ def render_table1_tab(
         st.metric("檔次段(segments)數", shown_rows)
         st.caption(f"來源 orders 筆數={orders_count}")
     with col2:
-        st.metric("客戶數", df_table1["客戶"].nunique() if "客戶" in df_table1.columns else (df_table1["HYUNDAI_CUSTIN"].nunique() if "HYUNDAI_CUSTIN" in df_table1.columns else 0))
+        st.metric(
+            "客戶數",
+            df_table1["客戶"].nunique()
+            if "客戶" in df_table1.columns
+            else (
+                df_table1["客戶名稱"].nunique()
+                if "客戶名稱" in df_table1.columns
+                else (df_table1["HYUNDAI_CUSTIN"].nunique() if "HYUNDAI_CUSTIN" in df_table1.columns else 0)
+            ),
+        )
     with col3:
         if "媒體平台" in df_table1.columns:
             st.metric("媒體平台數", df_table1["媒體平台"].nunique())
@@ -494,7 +503,11 @@ def render_table1_tab(
         with c2:
             sel_sales = st.selectbox("業務", ["全部"] + sorted(df_table1["業務"].unique().tolist())) if "業務" in df_table1.columns else "全部"
         with c3:
-            client_col_filter = "客戶" if "客戶" in df_table1.columns else "HYUNDAI_CUSTIN"
+            client_col_filter = (
+                "客戶"
+                if "客戶" in df_table1.columns
+                else ("客戶名稱" if "客戶名稱" in df_table1.columns else "HYUNDAI_CUSTIN")
+            )
             sel_client = (
                 st.selectbox("客戶", ["全部"] + sorted(df_table1[client_col_filter].dropna().unique().astype(str).tolist()))
                 if client_col_filter in df_table1.columns
@@ -506,11 +519,17 @@ def render_table1_tab(
         df_filtered = df_filtered[df_filtered["公司"] == sel_company]
     if sel_sales != "全部" and "業務" in df_filtered.columns:
         df_filtered = df_filtered[df_filtered["業務"] == sel_sales]
-    client_col_filter = "客戶" if "客戶" in df_table1.columns else "HYUNDAI_CUSTIN"
+    client_col_filter = (
+        "客戶" if "客戶" in df_table1.columns else ("客戶名稱" if "客戶名稱" in df_table1.columns else "HYUNDAI_CUSTIN")
+    )
     if sel_client != "全部" and client_col_filter in df_filtered.columns:
         df_filtered = df_filtered[df_filtered[client_col_filter].astype(str) == sel_client]
 
-    client_col = "客戶" if "客戶" in df_filtered.columns else "HYUNDAI_CUSTIN"
+    client_col = (
+        "客戶"
+        if "客戶" in df_filtered.columns
+        else ("客戶名稱" if "客戶名稱" in df_filtered.columns else "HYUNDAI_CUSTIN")
+    )
     cols_simple = [c for c in ["業務", "合約編號", client_col, "媒體平台", "秒數", "每天總檔次", "起始日", "終止日", "使用總秒數"] if c in df_filtered.columns]
     date_cols_t1 = [c for c in df_filtered.columns if re.match(r"^\d{1,2}/\d{1,2}\([一二三四五六日]\)$", str(c))]
     cols_admin = cols_simple + [c for c in ["店數", "委刊總檔數"] if c in df_filtered.columns] + date_cols_t1

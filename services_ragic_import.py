@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import hashlib
+import re
 import uuid
 from typing import Callable
 
@@ -224,6 +225,128 @@ def _ragic_get_field(entry: dict, name: str, ragic_fields: dict):
     if isinstance(entry, dict):
         return entry.get(name)
     return None
+
+
+def _parse_seconds_from_material_title(text: str) -> int | None:
+    """從素材／廣告篇名擷取秒數（如 30秒、[30]）。"""
+    if not text:
+        return None
+    s = str(text).strip()
+    for pat in (
+        r"(\d+)\s*秒",
+        r"\[(\d+)\]",
+        r"【(\d+)】",
+        r"\((\d+)\)\s*秒",
+    ):
+        m = re.search(pat, s)
+        if m:
+            try:
+                n = int(m.group(1))
+                if 5 <= n <= 180:
+                    return n
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
+def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) -> list[tuple[str, int | None]]:
+    """Ragic 子表 素材_廣告檔名：回傳 (篇名, 從篇名解析的秒數或 None)。"""
+    out: list[tuple[str, int | None]] = []
+    if not entry or not isinstance(entry, dict):
+        return out
+    keys_try: list[str] = []
+    if fid_ad_name:
+        keys_try.append(str(fid_ad_name))
+    keys_try.extend(["1015381", "廣告檔名", "廣告篇名", "素材檔名", "檔名"])
+
+    for val in entry.values():
+        if not isinstance(val, list) or not val:
+            continue
+        first = val[0]
+        if not isinstance(first, dict):
+            continue
+        sample_hit = False
+        for row in val:
+            if not isinstance(row, dict):
+                continue
+            title = ""
+            for k in keys_try:
+                cell = row.get(k)
+                if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
+                    title = str(cell).strip()
+                    break
+            if not title:
+                for cn in ("廣告檔名", "廣告篇名", "素材", "檔名"):
+                    cell = row.get(cn)
+                    if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
+                        title = str(cell).strip()
+                        break
+            if title:
+                sample_hit = True
+                break
+        if not sample_hit:
+            continue
+        for row in val:
+            if not isinstance(row, dict):
+                continue
+            title = ""
+            for k in keys_try:
+                cell = row.get(k)
+                if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
+                    title = str(cell).strip()
+                    break
+            if not title:
+                for cn in ("廣告檔名", "廣告篇名", "素材", "檔名"):
+                    cell = row.get(cn)
+                    if cell is not None and str(cell).strip() and str(cell).strip().lower() != "nan":
+                        title = str(cell).strip()
+                        break
+            ps = _parse_seconds_from_material_title(title) if title else None
+            out.append((title, ps))
+    return out
+
+
+def _material_titles_for_unit_seconds(rows: list[tuple[str, int | None]], unit_seconds: int) -> list[str]:
+    """依 CUE 單位秒數，篩選應拆分的素材篇名；無篇名時回傳單一空白。"""
+    typed = [(str(t).strip(), ps) for t, ps in rows]
+    non_empty = [(t, ps) for t, ps in typed if t]
+    if not non_empty:
+        return [""]
+    exact = [t for t, ps in non_empty if ps == unit_seconds]
+    if exact:
+        return exact
+    wild = [t for t, ps in non_empty if ps is None]
+    if wild:
+        return wild
+    return [""]
+
+
+def _fair_daily_spot_allocations(daily_totals: list[int], n: int) -> list[list[int]]:
+    """
+    將每日總檔次公平拆給 n 支素材：每日合計不變、全走期各素材總檔次最多差 1，
+    且逐日依「尚欠目標」分配，使後續依檔次變化切段時列數盡量少。
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [[int(x) for x in daily_totals]]
+    total_sum = sum(int(x) for x in daily_totals)
+    target_per = [total_sum // n + (1 if i < total_sum % n else 0) for i in range(n)]
+    cur = [0] * n
+    alloc_by_day: list[list[int]] = []
+    for T in daily_totals:
+        T = int(T)
+        base = T // n
+        rem = T % n
+        alloc = [base] * n
+        deficit = [(target_per[i] - cur[i] - base, -i) for i in range(n)]
+        deficit.sort(reverse=True)
+        for k in range(rem):
+            idx = -deficit[k][1]
+            alloc[idx] += 1
+        cur = [cur[i] + alloc[i] for i in range(n)]
+        alloc_by_day.append(alloc)
+    return alloc_by_day
 
 
 def _collect_excel_tokens_from_entry(entry: dict) -> list[str]:
@@ -484,6 +607,7 @@ def _ragic_entry_collect_order_rows(
     api_key: str,
     *,
     ragic_fields: dict,
+    ragic_subtable_fields: dict | None = None,
     parse_cue_excel_for_table1: Callable[..., list],
     normalize_date: Callable[[str], str],
     existing_order_id_map: dict,
@@ -493,8 +617,11 @@ def _ragic_entry_collect_order_rows(
     progress_cb: Callable[[dict], None] | None = None,
     entry_index: int | None = None,
     entry_total: int | None = None,
+    submit_date_display: str = "",
+    submit_at_sql: str = "",
 ) -> tuple[list[tuple[str, tuple]], dict]:
     from ragic_client import parse_file_tokens, download_file
+    from services_cue_parser import _split_by_spots_change
     from services_media_platform import parse_platform_region as _parse_platform_region
 
     ragic_id = entry.get("_ragicId")
@@ -541,6 +668,15 @@ def _ragic_entry_collect_order_rows(
     }
 
     rows_out: list[tuple[str, tuple]] = []
+
+    st_sub = dict(ragic_subtable_fields or {})
+    fid_material = st_sub.get("素材_廣告檔名") or st_sub.get("廣告檔名")
+    material_rows = _extract_ragic_material_filename_rows(
+        entry, str(fid_material) if fid_material else None
+    )
+    submit_disp = (submit_date_display or "").strip() or f"{datetime.now().month}/{datetime.now().day}"
+    updated_at_sql = (submit_at_sql or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    client_for_detail = str(_ragic_get_field(entry, "客戶", ragic_fields) or "")
 
     cue_val = _ragic_get_field(entry, "訂檔CUE表", ragic_fields)
     tokens = parse_file_tokens(cue_val) if cue_val not in (None, "") else []
@@ -680,38 +816,53 @@ def _ragic_entry_collect_order_rows(
 
         rows_before = len(rows_out)
         for i, u in enumerate(cue_units):
-            daily_spots = u.get("daily_spots") or []
-            days = int(u.get("days") or len(daily_spots) or 1)
-            total_spots = int(u.get("total_spots") or (sum(daily_spots) if daily_spots else 0))
-            spots = int(round(total_spots / max(days, 1))) if total_spots > 0 else int(daily_spots[0] if daily_spots else 0)
-            start_date = str(u.get("start_date") or _ragic_get_field(entry, "執行開始日期", ragic_fields) or "")
-            end_date = str(u.get("end_date") or _ragic_get_field(entry, "執行結束日期", ragic_fields) or "")
+            dates_list = list(u.get("dates") or [])
+            daily_spots = list(u.get("daily_spots") or [])
+            if dates_list and daily_spots and len(dates_list) != len(daily_spots):
+                m = min(len(dates_list), len(daily_spots))
+                dates_list = dates_list[:m]
+                daily_spots = daily_spots[:m]
+            if (not dates_list) and daily_spots and u.get("start_date") and u.get("end_date"):
+                try:
+                    dr = pd.date_range(u.get("start_date"), u.get("end_date"), freq="D")
+                    dates_list = [d.strftime("%Y-%m-%d") for d in dr][: len(daily_spots)]
+                except Exception:
+                    pass
+
+            cue_company = (u.get("cue_sheet_company") or "").strip()
+            cue_sales = (u.get("cue_sheet_sales") or "").strip()
+            eff_company = cue_company or order_info["company"]
+            eff_sales = cue_sales or order_info["sales"]
+
             seconds = int(u.get("seconds") or 0)
             platform = str(u.get("platform") or _ragic_get_field(entry, "平台", ragic_fields) or "")
             region = str(u.get("region") or "").strip()
             platform_for_order = platform
-            # orders.platform 會被後續 parse_platform_region 反解析成 segment.region；
-            # 若平台字串未帶區域，表1 會顯示「區域=未知」。
             if region and region != "未知" and (region not in platform_for_order):
                 platform_for_order = f"{platform_for_order}-{region}"
 
+            u_start = str(u.get("start_date") or _ragic_get_field(entry, "執行開始日期", ragic_fields) or "")
+            u_end = str(u.get("end_date") or _ragic_get_field(entry, "執行結束日期", ragic_fields) or "")
+
             skip_reason = None
-            if seconds <= 0 or spots <= 0:
-                skip_reason = f"秒數或檔次無效（秒數={seconds}，代表檔次={spots}）"
-            elif not platform or not start_date or not end_date:
+            if seconds <= 0:
+                skip_reason = f"秒數無效（秒數={seconds}）"
+            elif not daily_spots:
+                skip_reason = "無每日檔次資料"
+            elif not platform or not u_start or not u_end:
                 skip_reason = "缺少平台或起迄日期"
             else:
                 parsed_platform, _, _ = _parse_platform_region(platform_for_order)
                 if parsed_platform not in ["全家", "家樂福"]:
                     skip_reason = f"平台無法產生 segment（媒體={parsed_platform}，需為全家／家樂福）"
 
-            start_date_norm = normalize_date(start_date) or start_date if start_date else ""
-            end_date_norm = normalize_date(end_date) or end_date if end_date else ""
+            u_start_norm = normalize_date(u_start) or u_start if u_start else ""
+            u_end_norm = normalize_date(u_end) or u_end if u_end else ""
             if skip_reason is None:
-                s_date = pd.to_datetime(start_date_norm, errors="coerce")
-                e_date = pd.to_datetime(end_date_norm, errors="coerce")
+                s_date = pd.to_datetime(u_start_norm, errors="coerce")
+                e_date = pd.to_datetime(u_end_norm, errors="coerce")
                 if pd.isna(s_date) or pd.isna(e_date):
-                    skip_reason = f"起迄日期無法解析（{start_date_norm} ~ {end_date_norm}）"
+                    skip_reason = f"起迄日期無法解析（{u_start_norm} ~ {u_end_norm}）"
 
             if skip_reason:
                 state["skipped_summaries"].append(
@@ -719,95 +870,141 @@ def _ragic_entry_collect_order_rows(
                 )
                 continue
 
-            match_key = _order_match_key(
-                platform=platform_for_order,
-                client=order_info["client"],
-                product=order_info["product"],
-                sales=order_info["sales"],
-                company=order_info["company"],
-                start_date=start_date_norm,
-                end_date=end_date_norm,
-                seconds=seconds,
-                spots=spots,
-                contract_id=str(order_no),
-                region=region,
-            )
-            order_id = existing_order_id_map.get(match_key) or _make_ragic_order_id(
-                ragic_id=str(ragic_id),
-                order_no=str(order_no),
-                file_token=str(token),
-                unit_idx=i,
-                platform=platform_for_order,
-                client=order_info["client"],
-                product=order_info["product"],
-                sales=order_info["sales"],
-                company=order_info["company"],
-                start_date=start_date_norm,
-                end_date=end_date_norm,
-                seconds=seconds,
-                spots=spots,
-                region=region,
-            )
-            rows_out.append(
-                (
-                    rid_s,
-                    (
-                        order_id,
-                        platform_for_order,
-                        order_info["client"],
-                        order_info["product"],
-                        order_info["sales"],
-                        order_info["company"],
-                        start_date_norm,
-                        end_date_norm,
-                        seconds,
-                        spots,
-                        0,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        str(order_no),
-                        ragic_seconds_type,
-                        project_amount if project_amount and project_amount > 0 else None,
-                        None,
-                        region,
-                    ),
+            if not dates_list or len(dates_list) != len(daily_spots):
+                state["skipped_summaries"].append(
+                    f"檔#{file_i} unit#{i + 1} | 平台={platform} | 逐日日期與檔次長度不符（無法拆分素材） | {_format_unit_daily_detail(u)}"
                 )
-            )
-            detail_row = {
-                "業務": order_info.get("sales", ""),
-                "主管": str(_ragic_get_field(entry, "主管", ragic_fields) or ""),
-                "合約編號": str(order_no),
-                "公司": order_info.get("company", ""),
-                "實收金額": project_amount if project_amount and project_amount > 0 else "",
-                "除佣實收": project_amount if project_amount and project_amount > 0 else "",
-                "專案實收金額": project_amount if project_amount and project_amount > 0 else "",
-                "拆分金額": "待拆分計算",
-                "製作成本": str(_ragic_get_field(entry, "製作成本", ragic_fields) or ""),
-                "獎金%": str(_ragic_get_field(entry, "獎金%", ragic_fields) or ""),
-                "核定獎金": str(_ragic_get_field(entry, "核定獎金", ragic_fields) or ""),
-                "加發獎金": str(_ragic_get_field(entry, "加發獎金", ragic_fields) or ""),
-                "業務基金": str(_ragic_get_field(entry, "業務基金", ragic_fields) or ""),
-                "協力基金": str(_ragic_get_field(entry, "協力基金", ragic_fields) or ""),
-                "秒數用途": ragic_seconds_type,
-                "提交日": str(_ragic_get_field(entry, "建立日期", ragic_fields) or ""),
-                "HYUNDAI_CUSTIN": str(_ragic_get_field(entry, "客戶", ragic_fields) or ""),
-                "秒數": seconds,
-                "素材": str(u.get("ad_name") or ""),
-                "起始日": start_date_norm,
-                "終止日": end_date_norm,
-                "走期天數": days,
-                "區域": region,
-                "媒體平台": platform_for_order,
-            }
-            col_order = [
-                "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
-                "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
-                "HYUNDAI_CUSTIN", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
-            ]
-            row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
-            state["uploaded_rows_detail"].append(f"檔#{file_i} unit#{i + 1} | {row_text}")
-            state["imported_summaries"].append(
-                f"order_id={order_id} | 平台={platform_for_order} | {seconds}秒 | 代表檔次≈{spots}/日 | 秒數用途={ragic_seconds_type or '（空白）'} | 走期={start_date_norm}~{end_date_norm} | {_format_unit_daily_detail(u)} | sheet={u.get('source_sheet', '')!s}"
-            )
+                continue
+
+            mat_titles = _material_titles_for_unit_seconds(material_rows, seconds)
+            n_mat = len(mat_titles)
+            daily_totals = [int(x) for x in daily_spots]
+            allocs = _fair_daily_spot_allocations(daily_totals, n_mat)
+
+            for mi, prod_name in enumerate(mat_titles):
+                per_mat_daily = [allocs[d][mi] for d in range(len(allocs))]
+                if sum(per_mat_daily) <= 0:
+                    continue
+                split_groups = _split_by_spots_change(per_mat_daily, dates_list, dates_list[0], dates_list[-1])
+                if not split_groups:
+                    continue
+                for gi, group in enumerate(split_groups):
+                    g_days = int(group.get("days") or 0)
+                    ds_list = group.get("daily_spots_list") or []
+                    total_spots_g = int(sum(ds_list)) if ds_list else 0
+                    spots = (
+                        int(round(total_spots_g / max(g_days, 1)))
+                        if total_spots_g > 0
+                        else int(ds_list[0] if ds_list else 0)
+                    )
+                    if spots <= 0 or g_days <= 0:
+                        continue
+                    start_date = str(group.get("start_date") or u_start)
+                    end_date = str(group.get("end_date") or u_end)
+                    start_date_norm = normalize_date(start_date) or start_date if start_date else ""
+                    end_date_norm = normalize_date(end_date) or end_date if end_date else ""
+                    s_date = pd.to_datetime(start_date_norm, errors="coerce")
+                    e_date = pd.to_datetime(end_date_norm, errors="coerce")
+                    if pd.isna(s_date) or pd.isna(e_date):
+                        continue
+
+                    unit_idx = i * 1000 + mi * 20 + gi
+                    match_key = _order_match_key(
+                        platform=platform_for_order,
+                        client=order_info["client"],
+                        product=str(prod_name),
+                        sales=eff_sales,
+                        company=eff_company,
+                        start_date=start_date_norm,
+                        end_date=end_date_norm,
+                        seconds=seconds,
+                        spots=spots,
+                        contract_id=str(order_no),
+                        region=region,
+                    )
+                    order_id = existing_order_id_map.get(match_key) or _make_ragic_order_id(
+                        ragic_id=str(ragic_id),
+                        order_no=str(order_no),
+                        file_token=str(token),
+                        unit_idx=unit_idx,
+                        platform=platform_for_order,
+                        client=order_info["client"],
+                        product=str(prod_name),
+                        sales=eff_sales,
+                        company=eff_company,
+                        start_date=start_date_norm,
+                        end_date=end_date_norm,
+                        seconds=seconds,
+                        spots=spots,
+                        region=region,
+                    )
+                    rows_out.append(
+                        (
+                            rid_s,
+                            (
+                                order_id,
+                                platform_for_order,
+                                order_info["client"],
+                                str(prod_name),
+                                eff_sales,
+                                eff_company,
+                                start_date_norm,
+                                end_date_norm,
+                                seconds,
+                                spots,
+                                0,
+                                updated_at_sql,
+                                str(order_no),
+                                ragic_seconds_type,
+                                project_amount if project_amount and project_amount > 0 else None,
+                                None,
+                                region,
+                            ),
+                        )
+                    )
+                    detail_row = {
+                        "業務": eff_sales,
+                        "主管": str(_ragic_get_field(entry, "主管", ragic_fields) or ""),
+                        "合約編號": str(order_no),
+                        "公司": eff_company,
+                        "實收金額": project_amount if project_amount and project_amount > 0 else "",
+                        "除佣實收": project_amount if project_amount and project_amount > 0 else "",
+                        "專案實收金額": project_amount if project_amount and project_amount > 0 else "",
+                        "拆分金額": "待拆分計算",
+                        "製作成本": str(_ragic_get_field(entry, "製作成本", ragic_fields) or ""),
+                        "獎金%": str(_ragic_get_field(entry, "獎金%", ragic_fields) or ""),
+                        "核定獎金": str(_ragic_get_field(entry, "核定獎金", ragic_fields) or ""),
+                        "加發獎金": str(_ragic_get_field(entry, "加發獎金", ragic_fields) or ""),
+                        "業務基金": str(_ragic_get_field(entry, "業務基金", ragic_fields) or ""),
+                        "協力基金": str(_ragic_get_field(entry, "協力基金", ragic_fields) or ""),
+                        "秒數用途": ragic_seconds_type,
+                        "提交日": submit_disp,
+                        "客戶名稱": client_for_detail,
+                        "秒數": seconds,
+                        "素材": str(prod_name),
+                        "起始日": start_date_norm,
+                        "終止日": end_date_norm,
+                        "走期天數": g_days,
+                        "區域": region,
+                        "媒體平台": platform_for_order,
+                    }
+                    col_order = [
+                        "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
+                        "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
+                        "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
+                    ]
+                    row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
+                    state["uploaded_rows_detail"].append(
+                        f"檔#{file_i} unit#{i + 1} mat#{mi + 1}/{n_mat} seg#{gi + 1} | {row_text}"
+                    )
+                    ds_seg = group.get("dates") or []
+                    ds_part = [f"{d}:{sp}檔" for d, sp in zip(ds_seg, ds_list)] if ds_seg and ds_list else []
+                    daily_detail = "；".join(ds_part) if ds_part else str(ds_list)
+                    state["imported_summaries"].append(
+                        f"order_id={order_id} | 平台={platform_for_order} | 素材={prod_name!s} | {seconds}秒 | "
+                        f"代表檔次≈{spots}/日 | 秒數用途={ragic_seconds_type or '（空白）'} | 走期={start_date_norm}~{end_date_norm} | "
+                        f"{daily_detail} | sheet={u.get('source_sheet', '')!s}"
+                    )
 
         imported_now = len(rows_out) - rows_before
         if progress_cb:
@@ -866,6 +1063,7 @@ def import_ragic_to_orders_by_date_range_service(
     replace_existing: bool = False,
     max_fetch: int = 5000,
     ragic_fields: dict,
+    ragic_subtable_fields: dict | None = None,
     parse_cue_excel_for_table1: Callable[..., list],
     get_db_connection: Callable[[], object],
     init_db: Callable[[], None],
@@ -954,6 +1152,10 @@ def import_ragic_to_orders_by_date_range_service(
     if not filtered:
         return False, "指定日期區間內無資料", batch_id, ""
 
+    _now = datetime.now()
+    submit_date_display = f"{_now.month}/{_now.day}"
+    submit_at_sql = datetime(_now.year, _now.month, _now.day, 12, 0, 0).strftime("%Y-%m-%d %H:%M:%S")
+
     existing_order_id_map = _load_existing_order_id_map(get_db_connection)
     entry_outcomes: dict[str, dict] = {}
     staged_rows: list[tuple[str, tuple]] = []
@@ -965,6 +1167,7 @@ def import_ragic_to_orders_by_date_range_service(
             ref,
             api_key,
             ragic_fields=ragic_fields,
+            ragic_subtable_fields=ragic_subtable_fields,
             parse_cue_excel_for_table1=parse_cue_excel_for_table1,
             normalize_date=normalize_date,
             existing_order_id_map=existing_order_id_map,
@@ -974,6 +1177,8 @@ def import_ragic_to_orders_by_date_range_service(
             progress_cb=progress_cb,
             entry_index=idx,
             entry_total=len(filtered),
+            submit_date_display=submit_date_display,
+            submit_at_sql=submit_at_sql,
         )
         entry_outcomes[state["ragic_id"]] = state
         staged_rows.extend(chunk)
@@ -1196,6 +1401,7 @@ def import_ragic_single_entry_to_orders_service(
     replace_existing: bool,
     max_files_per_entry: int = 20,
     ragic_fields: dict,
+    ragic_subtable_fields: dict | None = None,
     parse_cue_excel_for_table1: Callable[..., list],
     get_db_connection: Callable[[], object],
     init_db: Callable[[], None],
@@ -1207,6 +1413,9 @@ def import_ragic_single_entry_to_orders_service(
 ) -> tuple[bool, str, str, str]:
     batch_id = f"ragic_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="info", phase="summary", message=f"開始匯入：單筆 ragic_id={ragic_id}")
+    _now = datetime.now()
+    submit_date_display = f"{_now.month}/{_now.day}"
+    submit_at_sql = datetime(_now.year, _now.month, _now.day, 12, 0, 0).strftime("%Y-%m-%d %H:%M:%S")
 
     if not ragic_url or not str(ragic_url).strip():
         _log_ragic_import(get_db_connection=get_db_connection, batch_id=batch_id, status="failed", phase="fetch", message="Ragic URL 空白")
@@ -1257,12 +1466,15 @@ def import_ragic_single_entry_to_orders_service(
         ref,
         api_key,
         ragic_fields=ragic_fields,
+        ragic_subtable_fields=ragic_subtable_fields,
         parse_cue_excel_for_table1=parse_cue_excel_for_table1,
         normalize_date=normalize_date,
         existing_order_id_map=existing_order_id_map,
         get_db_connection=get_db_connection,
         batch_id=batch_id,
         max_files=max_files_per_entry,
+        submit_date_display=submit_date_display,
+        submit_at_sql=submit_at_sql,
     )
     entry_outcomes = {state["ragic_id"]: state}
     order_rows = [p[1] for p in staged_rows]

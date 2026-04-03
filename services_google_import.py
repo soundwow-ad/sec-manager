@@ -117,11 +117,19 @@ def fetch_google_sheet_as_dataframe(sheet_id, gid=0):
 
 def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable[[str], str]):
     def get(k, default=""):
-        key = col_map.get(k, k)
-        if key not in row.index:
-            return default
-        v = row.get(key, default)
-        return "" if pd.isna(v) or v == "nan" else str(v).strip()
+        keys = [col_map.get(k, k)]
+        if k == "client":
+            keys = ["客戶名稱", "HYUNDAI_CUSTIN", "客戶", col_map.get(k, k)]
+        for key in keys:
+            if not key or key not in row.index:
+                continue
+            v = row.get(key, default)
+            if pd.isna(v) or v == "nan":
+                continue
+            s = str(v).strip()
+            if s:
+                return s
+        return default
 
     platform = get("platform") or get("平台")
     if not platform:
@@ -142,7 +150,7 @@ def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable
         amount_net = float(get("amount_net") or get("實收金額") or 0)
     except (ValueError, TypeError):
         amount_net = 0
-    client = get("client") or get("HYUNDAI_CUSTIN") or get("客戶")
+    client = get("client")
     product = get("product") or get("素材")
     sales = get("sales") or get("業務")
     company = get("company") or get("公司")
@@ -249,7 +257,7 @@ def import_google_sheet_to_orders_service(
         "company": "公司",
         "sales": "業務",
         "contract_id": "合約編號",
-        "client": "HYUNDAI_CUSTIN",
+        "client": "客戶名稱",
         "product": "素材",
         "start_date": "起始日",
         "end_date": "終止日",
@@ -258,7 +266,8 @@ def import_google_sheet_to_orders_service(
         "amount_net": "實收金額",
         "seconds_type": "秒數用途",
         "updated_at": "提交日",
-        "客戶": "HYUNDAI_CUSTIN",
+        "客戶": "客戶名稱",
+        "HYUNDAI_CUSTIN": "客戶名稱",
         "委刊總檔數": "委刊總檔數",
         "委刋總檔數": "委刋總檔數",
         "project_amount_net": "專案實收金額",

@@ -1203,6 +1203,7 @@ def parse_cueapp_excel(
                 data_start_row = (int(header_row_idx) if header_row_idx is not None else 0) + 2
 
             platform_info = _extract_platform_from_sheet(df, sheet_name)
+            cue_sheet_company, cue_sheet_sales = extract_cue_sheet_company_sales(df, sheet_name)
             seconds_info = _extract_seconds_from_sheet(df, sheet_name)
             default_seconds = seconds_info.get("seconds", 0)
             # 鉑霖／聲活：A 欄「頻道」直向合併，pandas 僅第一列有字、下列為 NaN，需沿用上一列頻道名才能讀到第二區（如高屏）
@@ -1287,6 +1288,8 @@ def parse_cueapp_excel(
                             "source_row": r,
                             "split_reason": group.get("split_reason", "none"),
                             "split_groups": [group],
+                            "cue_sheet_company": cue_sheet_company,
+                            "cue_sheet_sales": cue_sheet_sales,
                         }
                         if ad_unit["total_spots"] == 0:
                             ad_unit["total_spots"] = sum(ad_unit["daily_spots"])
@@ -1321,6 +1324,46 @@ CUE_HEADER_FIELD_ALIASES: dict[str, list[str]] = {
     "project_price": ["專案價", "專案價格", "成交價", "優惠價", "Project", "Package"],
     "cost_remarks": ["製作", "VAT", "稅", "小計", "合計", "備註"],
 }
+
+
+# CUE 版型 → 表1「公司」（與業務約定：東吳／聲活／鉑霖）
+CUE_VENDOR_TO_COMPANY: dict[str, str] = {
+    "dongwu": "東吳",
+    "shenghuo": "聲活",
+    "bolin": "鉑霖",
+}
+
+
+def extract_cue_sales_from_top_block(top_block: str) -> str:
+    """從 CUE 表頂部合併文字擷取業務姓名（找不到則空字串）。"""
+    s = str(top_block or "").replace("\n", " ")
+    patterns = [
+        r"業務[名稱]*[：:]\s*([^\s\n／/、,，]+)",
+        r"AE[：:]\s*([^\s\n／/、,，]+)",
+        r"Planner[：:]\s*([^\s\n／/、,，]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s)
+        if m:
+            name = m.group(1).strip()
+            for stop in ("聯絡", "電話", "Email", "MAIL", "／", "/"):
+                if stop in name:
+                    name = name.split(stop)[0].strip()
+            if len(name) >= 2:
+                return name
+    return ""
+
+
+def extract_cue_sheet_company_sales(df: pd.DataFrame, sheet_name: str) -> tuple[str, str]:
+    """回傳 (公司, 業務)，依 CUE 版型與表頭區文字；找不到則空字串。"""
+    if df is None or df.empty:
+        return "", ""
+    top = _cueapp_top_block_text(df)
+    a1 = str(df.iloc[0, 0]).strip() if df.shape[0] and df.shape[1] else ""
+    vendor, _ = detect_cue_vendor_from_sheet_block(top, sheet_name, first_cell_a1=a1)
+    company = CUE_VENDOR_TO_COMPANY.get(vendor or "", "")
+    sales = extract_cue_sales_from_top_block(top)
+    return company, sales
 
 
 def detect_cue_vendor_from_sheet_block(
@@ -1889,6 +1932,7 @@ def parse_cue_excel_for_table1(
                 df = df.loc[:, ~df.isna().all()]
                 sheet_date_range = _parse_sheet_date_range(sheet_name)
                 platform_info = _extract_platform_from_sheet(df, sheet_name)
+                cue_sheet_company, cue_sheet_sales = extract_cue_sheet_company_sales(df, sheet_name)
                 seconds_info = _extract_seconds_from_sheet(df, sheet_name)
                 daily_spots_rows = _extract_daily_spots_rows(df, sheet_name, sheet_date_range)
 
@@ -1916,6 +1960,8 @@ def parse_cue_excel_for_table1(
                             "source_row": spots_row.get("row_idx", -1),
                             "split_reason": group.get("split_reason", "none"),
                             "split_groups": [group],
+                            "cue_sheet_company": cue_sheet_company,
+                            "cue_sheet_sales": cue_sheet_sales,
                         }
                         if order_info:
                             ad_unit.update(

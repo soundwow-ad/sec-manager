@@ -50,7 +50,7 @@ def build_table1_from_cue_excel(
             # 若無法判斷 seconds_type，就保持空值（避免錯置成銷售秒數）
             "秒數用途": "",
             "提交日": "",
-            "HYUNDAI_CUSTIN": ad_unit.get("client", ""),
+            "客戶名稱": ad_unit.get("client", ""),
             "秒數": seconds,
             "素材": ad_unit.get("product", ""),
             "起始日": ad_unit.get("start_date", ""),
@@ -394,7 +394,7 @@ def build_table1_from_segments(
             # 若無 seconds_type 就保持空值；只有在值為「銷售」別名時才轉成「銷售秒數」
             "秒數用途": ("銷售秒數" if (row.get("seconds_type") or "") == "銷售" else (row.get("seconds_type") or "")),
             "提交日": df.loc[idx, "提交日"],
-            "HYUNDAI_CUSTIN": row.get("client", ""),
+            "客戶名稱": row.get("client", ""),
             "秒數": int(row.get("seconds", 0) or 0),
             "素材": row.get("product", ""),
             "起始日": row["start_date"].strftime("%Y/%m/%d") if pd.notna(row["start_date"]) else "",
@@ -449,7 +449,7 @@ def build_table1_from_segments(
         if "拆分金額" not in df_excel.columns:
             df_excel["拆分金額"] = 0
 
-    base_columns = ["業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額", "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日", "HYUNDAI_CUSTIN", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台"]
+    base_columns = ["業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額", "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日", "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台"]
     hour_columns = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]]
     stat_columns = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
     all_columns = base_columns + hour_columns + stat_columns + date_column_names
@@ -563,7 +563,7 @@ def build_excel_table1_view(
             "協力基金": "",
             "秒數用途": row.get("seconds_type") or "",
             "提交日": df.loc[idx, "提交日"],
-            "HYUNDAI_CUSTIN": row.get("client", ""),
+            "客戶名稱": row.get("client", ""),
             "秒數": int(row.get("seconds", 0) or 0),
             "素材": row.get("product", ""),
             "起始日": row["start_date"].strftime("%Y/%m/%d") if pd.notna(row["start_date"]) else "",
@@ -592,7 +592,7 @@ def build_excel_table1_view(
         result_rows.append(base_row)
 
     df_excel = pd.DataFrame(result_rows)
-    base_columns = ["業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日", "HYUNDAI_CUSTIN", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台"]
+    base_columns = ["業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日", "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台"]
     hour_columns = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]]
     stat_columns = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
     all_columns = base_columns + hour_columns + stat_columns + date_column_names

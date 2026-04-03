@@ -29,7 +29,7 @@ from ragic_client import (
 TABLE1_BASE_COLUMNS = [
     "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
     "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
-    "HYUNDAI_CUSTIN", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
+    "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
 ]
 TABLE1_HOUR_COLUMNS = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]]
 TABLE1_STAT_COLUMNS = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
@@ -831,7 +831,7 @@ def render_ragic_test_tab(
                         # 無法可靠判斷秒數用途時，維持空值（避免硬推銷售秒數）
                         "秒數用途": ragic_overrides.get("秒數用途", ""),
                         "提交日": ragic_overrides.get("提交日") or PLACEHOLDER_MISSING,
-                        "HYUNDAI_CUSTIN": order_info.get("client") or PLACEHOLDER_NOT_AVAILABLE,
+                        "客戶名稱": order_info.get("client") or PLACEHOLDER_NOT_AVAILABLE,
                         "秒數": sec,
                         "素材": order_info.get("product") or PLACEHOLDER_NOT_AVAILABLE,
                         "起始日": u.get("start_date") or "",

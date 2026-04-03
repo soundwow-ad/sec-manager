@@ -10,7 +10,7 @@ import streamlit as st
 def render_sidebar_google_import(*, import_google_sheet_to_orders):
     st.sidebar.markdown("### 📊 資料來源")
     with st.sidebar.expander("📥 匯入 Google 試算表（表1結構）", expanded=False):
-        st.caption("貼上試算表網址或 ID，結構需含：平台、起始日、終止日、秒數、每天總檔次、客戶(HYUNDAI_CUSTIN)、素材、業務、公司、合約編號、實收金額、秒數用途等。")
+        st.caption("貼上試算表網址或 ID，結構需含：平台、起始日、終止日、秒數、每天總檔次、客戶名稱、素材、業務、公司、合約編號、實收金額、秒數用途等。")
         gs_url = st.text_input(
             "試算表網址或 ID",
             value="https://docs.google.com/spreadsheets/d/1x2cboM_xmB7nl9aA12O633BzmvPNyJnZoqPipOQhVY4/edit?usp=sharing",

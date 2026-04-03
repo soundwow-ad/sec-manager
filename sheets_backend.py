@@ -421,7 +421,7 @@ def _build_template_sheet_df(df_src: pd.DataFrame, headers: list[str], source_ty
                 "業務": sales,
                 "秒數用途": seconds_type,
                 "提交日": updated_at,
-                "HYUNDAI_CUSTIN": client,
+                "客戶名稱": client,
                 "秒數": seconds,
                 "素材": product,
                 "起始日": start_date,
@@ -483,7 +483,7 @@ def _build_template_sheet_rows(df_src: pd.DataFrame, headers: list[str], source_
         put(row_vals, "業務", sales)
         put(row_vals, "秒數用途", seconds_type)
         put(row_vals, "提交日", updated_at)
-        put(row_vals, "HYUNDAI_CUSTIN", client)
+        put(row_vals, "客戶名稱", client)
         put(row_vals, "秒數", seconds)
         put(row_vals, "素材", product)
         put(row_vals, "起始日", start_date)
@@ -803,7 +803,7 @@ def update_source_sheet_seconds_type(
             "platform": "平台",
             "company": "公司",
             "sales": "業務",
-            "client": "HYUNDAI_CUSTIN",
+            "client": "客戶名稱",
             "product": "素材",
             "start_date": "起始日",
             "end_date": "終止日",
@@ -813,6 +813,14 @@ def update_source_sheet_seconds_type(
         }
         col_idx = {}
         for k, h in req_cols.items():
+            if k == "client":
+                if "客戶名稱" in header:
+                    col_idx[k] = header.index("客戶名稱")
+                elif "HYUNDAI_CUSTIN" in header:
+                    col_idx[k] = header.index("HYUNDAI_CUSTIN")
+                else:
+                    return ["來源表缺少欄位：客戶名稱（或舊欄 HYUNDAI_CUSTIN）"]
+                continue
             if h not in header:
                 if k == "spots" and "委刊總檔數" in header:
                     col_idx[k] = header.index("委刊總檔數")
