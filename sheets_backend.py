@@ -11,6 +11,7 @@ import math
 import os
 import hashlib
 import re
+from datetime import datetime
 from typing import Any
 import pandas as pd
 
@@ -376,6 +377,158 @@ def _extract_template_layout_from_google_sheet() -> tuple[list[list[str]], list[
     return [row_month, row_day, row_header], row_header
 
 
+# 表1樣式分頁：不寫入「每日檔次」的欄位（固定欄＋時段欄）
+_TEMPLATE_STATIC_HEADER_NAMES = frozenset(
+    {
+        "平台",
+        "公司",
+        "業務",
+        "主管",
+        "秒數用途",
+        "提交日",
+        "客戶名稱",
+        "秒數",
+        "素材",
+        "起始日",
+        "終止日",
+        "走期天數",
+        "區域",
+        "媒體平台",
+        "每天總檔次",
+        "委刋總檔數",
+        "委刊總檔數",
+        "總秒數",
+        "店數",
+        "使用總秒數",
+        "實收金額",
+        "除佣實收",
+        "專案實收金額",
+        "拆分金額",
+        "製作成本",
+        "獎金%",
+        "核定獎金",
+        "加發獎金",
+        "業務基金",
+        "協力基金",
+        "合約編號",
+    }
+)
+_TEMPLATE_HOUR_HEADER_NAMES = frozenset(str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1])
+_DATE_HEADER_RE = re.compile(r"^(\d{1,2})/(\d{1,2})\(([一二三四五六日])\)\s*$")
+
+
+def _forward_fill_header_row(vals: list[Any]) -> list[str]:
+    out: list[str] = []
+    last = ""
+    for v in vals:
+        s = str(v).strip() if v is not None else ""
+        if s and s.lower() not in ("nan", "none"):
+            last = s
+        out.append(last)
+    return out
+
+
+def _parse_template_month_cell(month_s: str, anchor: pd.Timestamp) -> tuple[int, int] | None:
+    """由模板「月份列」儲存格得到 (year, month)。"""
+    s = str(month_s or "").strip()
+    if not s or s.lower() == "nan":
+        return None
+    m = re.search(r"(20\d{2})\s*[-/年]\s*(\d{1,2})", s)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"(20\d{2})\s*/\s*(\d{1,2})\s*$", s)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"(\d{1,3})\s*年\s*(\d{1,2})\s*月", s)
+    if m:
+        roc = int(m.group(1))
+        y = roc + 1911 if roc < 200 else roc
+        return y, int(m.group(2))
+    m = re.search(r"(\d{1,2})\s*月", s)
+    if m:
+        mo = int(m.group(1))
+        y = int(anchor.year) if pd.notna(anchor) else datetime.now().year
+        return y, mo
+    return None
+
+
+def _prepare_template_layout_meta(
+    layout_rows: list[list[str]],
+    headers: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]] | None:
+    if len(layout_rows) < 3 or not headers:
+        return None
+    row_month = [str(x).strip() for x in (layout_rows[0] or [])]
+    row_day = [str(x).strip() for x in (layout_rows[1] or [])]
+    row_hdr = [str(x).strip() for x in (layout_rows[2] or [])]
+    hdr = [str(x).strip() for x in headers]
+    n = max(len(hdr), len(row_hdr), len(row_month), len(row_day))
+    row_month = (row_month + [""] * n)[:n]
+    row_day = (row_day + [""] * n)[:n]
+    row_hdr = (row_hdr + [""] * n)[:n]
+    hdr = (hdr + [""] * n)[:n]
+    row_month_ff = _forward_fill_header_row(row_month)
+    return row_month_ff, row_day, row_hdr, hdr
+
+
+def _calendar_date_at_template_column(
+    j: int,
+    meta: tuple[list[str], list[str], list[str], list[str]],
+    anchor: pd.Timestamp,
+) -> pd.Timestamp | None:
+    """
+    依模板第 j 欄與本列走期錨點（起始日）推算該欄代表的國曆日期。
+    支援：(1) 表頭為 2/27(五) 形式 (2) 上方月份列＋日列為日期的連續區。
+    """
+    row_month_ff, row_day, row_hdr, headers = meta
+    if j < 0 or j >= len(headers):
+        return None
+    h = str(headers[j]).strip()
+    if h in _TEMPLATE_STATIC_HEADER_NAMES:
+        return None
+    y0 = int(anchor.year) if pd.notna(anchor) else datetime.now().year
+
+    m = _DATE_HEADER_RE.match(h)
+    if m:
+        mo, da = int(m.group(1)), int(m.group(2))
+        for dy in (0, -1, 1):
+            try:
+                ts = pd.Timestamp(year=y0 + dy, month=mo, day=da)
+                if pd.notna(anchor) and abs((ts - anchor).days) < 800:
+                    return ts
+            except (ValueError, TypeError):
+                pass
+        try:
+            return pd.Timestamp(year=y0, month=mo, day=da)
+        except (ValueError, TypeError):
+            return None
+
+    day_s = str(row_day[j]).strip() if j < len(row_day) else ""
+    if not day_s.isdigit():
+        rh = str(row_hdr[j]).strip() if j < len(row_hdr) else ""
+        if rh in _TEMPLATE_HOUR_HEADER_NAMES and not str(row_month_ff[j] if j < len(row_month_ff) else "").strip():
+            return None
+        return None
+    day_i = int(day_s)
+    if not (1 <= day_i <= 31):
+        return None
+    ms = str(row_month_ff[j]).strip() if j < len(row_month_ff) else ""
+    parsed = _parse_template_month_cell(ms, anchor) if ms else None
+    if parsed:
+        y, mo = parsed
+        try:
+            return pd.Timestamp(year=y, month=mo, day=day_i)
+        except (ValueError, TypeError):
+            return None
+    rh = str(row_hdr[j]).strip() if j < len(row_hdr) else ""
+    if rh in _TEMPLATE_HOUR_HEADER_NAMES:
+        return None
+    try:
+        return pd.Timestamp(year=y0, month=int(anchor.month) if pd.notna(anchor) else 1, day=day_i)
+    except (ValueError, TypeError):
+        return None
+
+
 def _days_between(start_date: Any, end_date: Any) -> int | None:
     try:
         s = pd.to_datetime(start_date, errors="coerce")
@@ -439,9 +592,16 @@ def _build_template_sheet_df(df_src: pd.DataFrame, headers: list[str], source_ty
     return pd.DataFrame(out_rows, columns=headers)
 
 
-def _build_template_sheet_rows(df_src: pd.DataFrame, headers: list[str], source_type: str) -> list[list[Any]]:
+def _build_template_sheet_rows(
+    df_src: pd.DataFrame,
+    headers: list[str],
+    source_type: str,
+    *,
+    layout_meta: tuple[list[str], list[str], list[str], list[str]] | None = None,
+) -> list[list[Any]]:
     """
     依模板欄位建立資料列（不含抬頭）。
+    若提供 layout_meta（模板月份列／日列／表頭列），將每日投放檔次寫入對應「日期欄」，與表1 邏輯一致。
     """
     if df_src is None:
         df_src = pd.DataFrame()
@@ -497,6 +657,24 @@ def _build_template_sheet_rows(df_src: pd.DataFrame, headers: list[str], source_
         put(row_vals, "合約編號", contract_id)
         put(row_vals, "實收金額", amount_net)
         put(row_vals, "除佣實收", amount_net)
+
+        if layout_meta is not None:
+            s_ts = pd.to_datetime(start_date, errors="coerce")
+            e_ts = pd.to_datetime(end_date, errors="coerce")
+            if pd.notna(s_ts) and pd.notna(e_ts):
+                try:
+                    spot_int = int(float(spots)) if spots not in ("", None) else 0
+                except (TypeError, ValueError):
+                    spot_int = 0
+                if spot_int > 0:
+                    anchor = s_ts
+                    for j in range(len(row_vals)):
+                        col_dt = _calendar_date_at_template_column(j, layout_meta, anchor)
+                        if col_dt is None or pd.isna(col_dt):
+                            continue
+                        dnorm = col_dt.normalize()
+                        if s_ts.normalize() <= dnorm <= e_ts.normalize():
+                            row_vals[j] = _sheet_cell_json_safe(spot_int)
         rows_out.append(row_vals)
     return rows_out
 
@@ -514,8 +692,9 @@ def _write_template_style_tabs(
     ws_o = sh.worksheet(WS_T1_TEMPLATE_ORDERS)
     ws_s = sh.worksheet(WS_T1_TEMPLATE_SEGMENTS)
 
-    rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders")
-    rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments")
+    layout_meta = _prepare_template_layout_meta(layout_rows, headers)
+    rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders", layout_meta=layout_meta)
+    rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments", layout_meta=layout_meta)
     values_o = _sanitize_sheet_matrix(layout_rows + rows_o)
     values_s = _sanitize_sheet_matrix(layout_rows + rows_s)
 
