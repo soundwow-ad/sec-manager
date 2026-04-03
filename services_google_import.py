@@ -252,6 +252,17 @@ def import_google_sheet_to_orders_service(
     if err:
         return False, f"無法讀取試算表：{err}"
 
+    if "合約編號" not in df.columns:
+        return False, "試算表缺少「合約編號」欄位，無法匯入（此欄位必填）。"
+
+    contract_series = df["合約編號"]
+    missing_contract_mask = contract_series.isna() | contract_series.astype(str).str.strip().eq("")
+    if missing_contract_mask.any():
+        bad_rows = (df.index[missing_contract_mask] + 2).tolist()
+        sample_rows = ", ".join(str(x) for x in bad_rows[:10])
+        more = f" 等 {len(bad_rows)} 列" if len(bad_rows) > 10 else ""
+        return False, f"試算表有列缺少「合約編號」（例如第 {sample_rows} 列{more}），無法匯入。"
+
     col_map = {
         "platform": "平台",
         "company": "公司",

@@ -777,6 +777,7 @@ def _ragic_entry_collect_order_rows(
     rid_s = str(ragic_id)
     order_no = _ragic_get_field(entry, "訂檔單號", ragic_fields) or f"ragic_{ragic_id}"
     order_no = str(order_no)
+    contract_id = str(_ragic_get_field(entry, "CUE", ragic_fields) or "").strip()
     merged_for_material = dict(ragic_fields or {})
     if ragic_subtable_fields:
         merged_for_material.update(ragic_subtable_fields)
@@ -787,7 +788,7 @@ def _ragic_entry_collect_order_rows(
         "product": product_merge,
         "sales": str(_ragic_get_field(entry, "業務(開發客戶)", ragic_fields) or ""),
         "company": str(_ragic_get_field(entry, "公司", ragic_fields) or ""),
-        "order_id": str(order_no),
+        "order_id": contract_id,
         "amount_net": 0,
     }
     # Ragic 為秒數用途單一真實來源：匯入時直接採用此值。
@@ -820,6 +821,19 @@ def _ragic_entry_collect_order_rows(
         "cue_excel_layout_sections": [],
         "cue_structural_reports": [],
     }
+
+    if not contract_id:
+        state["issues"].append("缺少 CUE 欄位（合約編號；流水號 1015336），無法匯入")
+        _log_ragic_import(
+            get_db_connection=get_db_connection,
+            batch_id=batch_id,
+            status="failed",
+            phase="summary",
+            ragic_id=ragic_id,
+            order_no=order_no,
+            message="缺少 CUE 欄位（合約編號；流水號 1015336），無法匯入",
+        )
+        return [], state
 
     rows_out: list[tuple[str, tuple]] = []
 
@@ -1076,7 +1090,7 @@ def _ragic_entry_collect_order_rows(
                         end_date=end_date_norm,
                         seconds=seconds,
                         spots=spots,
-                        contract_id=str(order_no),
+                        contract_id=contract_id,
                         region=region,
                     )
                     order_id = existing_order_id_map.get(match_key) or _make_ragic_order_id(
@@ -1111,7 +1125,7 @@ def _ragic_entry_collect_order_rows(
                                 spots,
                                 0,
                                 updated_at_sql,
-                                str(order_no),
+                                contract_id,
                                 ragic_seconds_type,
                                 project_amount if project_amount and project_amount > 0 else None,
                                 None,
@@ -1122,7 +1136,7 @@ def _ragic_entry_collect_order_rows(
                     detail_row = {
                         "業務": eff_sales,
                         "主管": str(_ragic_get_field(entry, "主管", ragic_fields) or ""),
-                        "合約編號": str(order_no),
+                        "合約編號": contract_id,
                         "公司": eff_company,
                         "實收金額": project_amount if project_amount and project_amount > 0 else "",
                         "除佣實收": project_amount if project_amount and project_amount > 0 else "",
@@ -1949,7 +1963,7 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
 
     contract_to_entries: dict[str, list[dict]] = {}
     for entry in all_entries:
-        cid = str(_ragic_get_field(entry, "訂檔單號", ragic_fields) or "").strip()
+        cid = str(_ragic_get_field(entry, "CUE", ragic_fields) or "").strip()
         if cid:
             contract_to_entries.setdefault(cid, []).append(entry)
 
@@ -1961,7 +1975,7 @@ def append_seconds_type_notes_to_ragic_by_contract_service(
         rid = str(entry.get("_ragicId") or "").strip()
         if not rid:
             continue
-        contract_id = str(_ragic_get_field(entry, "訂檔單號", ragic_fields) or "").strip()
+        contract_id = str(_ragic_get_field(entry, "CUE", ragic_fields) or "").strip()
         if contract_id not in contracts:
             continue
         matched_contracts.add(contract_id)
