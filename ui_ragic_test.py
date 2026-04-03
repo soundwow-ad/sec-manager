@@ -165,9 +165,9 @@ def _entry_to_order_info(entry: dict, ragic_fields: dict[str, str]) -> dict:
             return _normalize_cell(entry.get(fid))
         return _normalize_cell(entry.get(name, ""))
 
-    # 素材欄：優先子表「廣告篇名」等（與正式 Ragic 匯入一致），勿用主表「產品名稱」當素材
+    # 素材欄：僅子表「廣告篇名」（與正式 Ragic 匯入一致）；缺則空白，不以主表產品名等替代
     mat = _ragic_material_display_string(entry, ragic_fields)
-    product = mat or g("產品名稱")
+    product = mat
 
     return {
         "client": g("客戶"),

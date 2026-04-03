@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import hashlib
+import json
 import re
 import uuid
 from typing import Callable
@@ -249,37 +250,20 @@ def _parse_seconds_from_material_title(text: str) -> int | None:
     return None
 
 
-def _fallback_material_title_from_row_values(row: dict) -> str:
-    """
-    Ragic 子表列常僅以流水號為 key（畫面才對應到「廣告篇名」）。
-    從列上所有字串值中，挑最像「篇名」者：含 數字+秒 或 [數字]，且優先排除 .mp3 檔名。
-    """
-    if not isinstance(row, dict):
-        return ""
-    candidates: list[tuple[int, str]] = []
-    for v in row.values():
-        if not isinstance(v, str):
-            continue
-        s = v.strip()
-        if not s or s.lower() == "nan":
-            continue
-        if not re.search(r"\d+\s*秒", s) and not re.search(r"\[\d+\]", s):
-            continue
-        score = 3 if re.search(r"\d+\s*秒", s) else 1
-        if s.lower().endswith(".mp3"):
-            score -= 2
-        if "@" in s and s.lower().endswith(".mp3"):
-            score -= 2
-        candidates.append((score, s))
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
-    best_score, best_s = candidates[0]
-    return best_s if best_score > 0 else ""
+def _try_parse_json_array_of_objects(s: str) -> list | None:
+    """Ragic 偶將子表序列化成 JSON 字串。"""
+    t = str(s).strip()
+    if len(t) < 2 or t[0] != "[":
+        return None
+    try:
+        j = json.loads(t)
+    except Exception:
+        return None
+    return j if isinstance(j, list) else None
 
 
-def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str:
-    """單一子表列：優先廣告篇名（再檔名／流水號），避免誤用主表產品名。"""
+def _material_title_from_subtable_row(row: dict, fid_article_name: str | None) -> str:
+    """單一子表列：僅採用「廣告篇名」（或 config 指定之篇名欄位 ID）；缺則空白，不以其他欄位替代。"""
     if not isinstance(row, dict):
         return ""
 
@@ -289,21 +273,22 @@ def _material_title_from_subtable_row(row: dict, fid_ad_name: str | None) -> str
         s = str(v).strip()
         return bool(s) and s.lower() != "nan"
 
-    for cn in ("廣告篇名", "廣告檔名", "素材檔名", "檔名", "素材"):
-        if _ok(row.get(cn)):
-            return str(row.get(cn)).strip()
-    if fid_ad_name and _ok(row.get(str(fid_ad_name))):
-        return str(row.get(str(fid_ad_name))).strip()
-    if _ok(row.get("1015381")):
-        return str(row.get("1015381")).strip()
-    # 子表欄位若全為數字 key，改由字串型態猜篇名（與「素材音檔」.mp3 區隔）
-    return _fallback_material_title_from_row_values(row)
+    if _ok(row.get("廣告篇名")):
+        return str(row.get("廣告篇名")).strip()
+    if fid_article_name and _ok(row.get(str(fid_article_name))):
+        return str(row.get(str(fid_article_name))).strip()
+    return ""
 
 
 def _collect_ragic_lists_of_dicts(node: object, bucket: list[list], seen_ids: set[int]) -> None:
     """遞迴掃描 Ragic entry（含巢狀子表），收集「含至少一筆 dict 列」的 list（Ragic 偶有空列／非 dict 占位）。"""
     if isinstance(node, dict):
         for v in node.values():
+            if isinstance(v, str):
+                parsed = _try_parse_json_array_of_objects(v)
+                if isinstance(parsed, list):
+                    _collect_ragic_lists_of_dicts(parsed, bucket, seen_ids)
+                    continue
             _collect_ragic_lists_of_dicts(v, bucket, seen_ids)
         return
     if isinstance(node, list):
@@ -318,7 +303,7 @@ def _collect_ragic_lists_of_dicts(node: object, bucket: list[list], seen_ids: se
 
 
 def _ragic_subtable_list_smells_material(lst: list) -> bool:
-    """辨識「訂檔素材」子表，避免誤用收入等其他子表。"""
+    """辨識「訂檔素材」子表，避免誤用收入等其他子表（結構特徵；素材字串仍只取廣告篇名）。"""
     if not lst:
         return False
     hint_keys = frozenset({"廣告篇名", "廣告檔名", "素材音檔", "素材檔名", "1015381", "1015380", "1015382"})
@@ -328,13 +313,52 @@ def _ragic_subtable_list_smells_material(lst: list) -> bool:
         ks = {str(k) for k in r.keys()}
         if ks & hint_keys:
             return True
-        if _material_title_from_subtable_row(r, None) or _fallback_material_title_from_row_values(r):
-            return True
     return False
 
 
-def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) -> list[tuple[str, int | None]]:
-    """Ragic 子表 素材_廣告檔名：回傳 (篇名, 從篇名解析的秒數或 None)。"""
+def _embedded_material_dict_rows(entry: dict) -> list[dict]:
+    """
+    連結子列／部分 API 會把素材放在「數字 key 下的獨立 dict」（非 list），
+    與主表 dict 區隔：不採用根物件本身。
+    """
+    if not isinstance(entry, dict):
+        return []
+    root_id = id(entry)
+    found: list[dict] = []
+    seen: set[int] = set()
+
+    def walk(o: object) -> None:
+        if isinstance(o, dict):
+            if id(o) != root_id:
+                ks = set(o.keys())
+                gv = str(o.get("廣告篇名") or "").strip()
+                if "廣告篇名" in ks and gv:
+                    oid = id(o)
+                    if oid not in seen:
+                        seen.add(oid)
+                        found.append(o)
+            for v in o.values():
+                if isinstance(v, str):
+                    parsed = _try_parse_json_array_of_objects(v)
+                    if isinstance(parsed, list):
+                        walk(parsed)
+                        continue
+                walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+
+    walk(entry)
+    return found
+
+
+def _extract_ragic_material_filename_rows(
+    entry: dict,
+    fid_subtable: str | None,
+    *,
+    fid_article_name: str | None = None,
+) -> list[tuple[str, int | None]]:
+    """Ragic 素材子表：回傳 (廣告篇名, 從篇名解析的秒數或 None)；篇名缺則空字串，不以檔名等替代。"""
     out: list[tuple[str, int | None]] = []
     if not entry or not isinstance(entry, dict):
         return out
@@ -344,17 +368,23 @@ def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) 
         for row in val:
             if not isinstance(row, dict):
                 continue
-            title = _material_title_from_subtable_row(row, fid_ad_name)
+            title = _material_title_from_subtable_row(row, fid_article_name)
             ps = _parse_seconds_from_material_title(title) if title else None
             acc.append((title, ps))
         return acc
 
-    if fid_ad_name:
-        direct = entry.get(str(fid_ad_name))
-        if isinstance(direct, list) and direct and isinstance(direct[0], dict):
-            tmp = _parse_list(direct)
-            if any(str(t).strip() for t, _ in tmp):
-                return tmp
+    if fid_subtable:
+        direct = entry.get(str(fid_subtable))
+        if isinstance(direct, str):
+            parsed = _try_parse_json_array_of_objects(direct)
+            if isinstance(parsed, list):
+                direct = parsed
+        if isinstance(direct, list) and direct:
+            dict_rows = [x for x in direct if isinstance(x, dict)]
+            if dict_rows:
+                tmp = _parse_list(direct)
+                if any(str(t).strip() for t, _ in tmp):
+                    return tmp
 
     all_lists: list[list] = []
     _collect_ragic_lists_of_dicts(entry, all_lists, set())
@@ -364,28 +394,43 @@ def _extract_ragic_material_filename_rows(entry: dict, fid_ad_name: str | None) 
         material_lists = list(all_lists)
 
     for val in material_lists:
-        if not val or not isinstance(val[0], dict):
+        if not val:
             continue
-        sample_hit = any(_material_title_from_subtable_row(r, fid_ad_name) for r in val if isinstance(r, dict))
+        dict_rows = [x for x in val if isinstance(x, dict)]
+        if not dict_rows:
+            continue
+        sample_hit = any(
+            str(_material_title_from_subtable_row(r, fid_article_name)).strip() for r in dict_rows
+        )
         if not sample_hit:
             continue
-        for row in val:
-            if not isinstance(row, dict):
-                continue
-            title = _material_title_from_subtable_row(row, fid_ad_name)
+        for row in dict_rows:
+            title = _material_title_from_subtable_row(row, fid_article_name)
             ps = _parse_seconds_from_material_title(title) if title else None
             out.append((title, ps))
+
+    if not any(str(t).strip() for t, _ in out):
+        for d in _embedded_material_dict_rows(entry):
+            title = _material_title_from_subtable_row(d, fid_article_name)
+            if str(title).strip():
+                ps = _parse_seconds_from_material_title(title) if title else None
+                out.append((title, ps))
     return out
 
 
 def _ragic_material_display_string(entry: dict, ragic_fields: dict | None) -> str:
     """
-    供 Ragic 測試頁／order_info：從子表彙整素材篇名（去重、分號連接）。
-    ragic_fields 須含「素材_廣告檔名」流水號（與 config 一致）。
+    供 Ragic 測試頁／order_info：從子表彙整「廣告篇名」（去重、分號連接）。
+    ragic_fields 須含「素材_廣告檔名」流水號；可選「廣告篇名」流水號（API 僅回欄位 ID 時）。
     """
     st = dict(ragic_fields or {})
     fid = st.get("素材_廣告檔名") or st.get("廣告檔名")
-    rows = _extract_ragic_material_filename_rows(entry, str(fid) if fid else None)
+    fid_art = st.get("廣告篇名")
+    rows = _extract_ragic_material_filename_rows(
+        entry,
+        str(fid) if fid else None,
+        fid_article_name=str(fid_art) if fid_art else None,
+    )
     titles: list[str] = []
     seen: set[str] = set()
     for t, _ in rows:
@@ -722,7 +767,7 @@ def _ragic_entry_collect_order_rows(
     if ragic_subtable_fields:
         merged_for_material.update(ragic_subtable_fields)
     mat_for_merge = _ragic_material_display_string(entry, merged_for_material)
-    product_merge = mat_for_merge or str(_ragic_get_field(entry, "產品名稱", ragic_fields) or "")
+    product_merge = mat_for_merge
     order_info = {
         "client": str(_ragic_get_field(entry, "客戶", ragic_fields) or ""),
         "product": product_merge,
@@ -766,8 +811,11 @@ def _ragic_entry_collect_order_rows(
 
     st_sub = dict(ragic_subtable_fields or {})
     fid_material = st_sub.get("素材_廣告檔名") or st_sub.get("廣告檔名")
+    fid_article = st_sub.get("廣告篇名")
     material_rows = _extract_ragic_material_filename_rows(
-        entry, str(fid_material) if fid_material else None
+        entry,
+        str(fid_material) if fid_material else None,
+        fid_article_name=str(fid_article) if fid_article else None,
     )
     submit_disp = (submit_date_display or "").strip() or f"{datetime.now().month}/{datetime.now().day}"
     updated_at_sql = (submit_at_sql or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
