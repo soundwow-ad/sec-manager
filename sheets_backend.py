@@ -47,6 +47,7 @@ def _sanitize_sheet_matrix(values: list[list[Any]]) -> list[list[Any]]:
 
 # 各工作表名稱（與 DB 表對應）
 WS_ORDERS = "Orders"
+WS_ORDERS_DETAIL = "Orders_Detail"
 WS_SEGMENTS = "Segments"
 WS_PLATFORM_SETTINGS = "PlatformSettings"
 WS_CAPACITY = "Capacity"
@@ -57,6 +58,7 @@ WS_T1_TEMPLATE_SEGMENTS = "表1樣式_Segments"
 
 ALL_WORKHEET_NAMES = [
     WS_ORDERS,
+    WS_ORDERS_DETAIL,
     WS_SEGMENTS,
     WS_PLATFORM_SETTINGS,
     WS_CAPACITY,
@@ -290,6 +292,67 @@ def _df_to_values(df: pd.DataFrame) -> list[list[Any]]:
         return []
     df = df.fillna("")
     return [df.columns.tolist()] + df.astype(str).values.tolist()
+
+
+def _build_contract_orders_view(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    將明細列 orders 彙總成「一合約一列」視圖（供 Google Orders 分頁展示）。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["id", "contract_id"])
+    x = df.copy()
+    if "contract_id" not in x.columns:
+        x["contract_id"] = x.get("id", "")
+    x["contract_id"] = x["contract_id"].fillna("").astype(str).str.strip()
+    x = x[x["contract_id"] != ""].copy()
+    if x.empty:
+        return pd.DataFrame(columns=["id", "contract_id"])
+
+    x["_start_ts"] = pd.to_datetime(x.get("start_date"), errors="coerce")
+    x["_end_ts"] = pd.to_datetime(x.get("end_date"), errors="coerce")
+    x["_upd_ts"] = pd.to_datetime(x.get("updated_at"), errors="coerce")
+    x = x.sort_values(["contract_id", "_upd_ts"], ascending=[True, False], na_position="last")
+
+    rows: list[dict[str, Any]] = []
+    for cid, g in x.groupby("contract_id", sort=False):
+        first = g.iloc[0]
+        start_min = g["_start_ts"].dropna().min()
+        end_max = g["_end_ts"].dropna().max()
+        amount_sum = pd.to_numeric(g.get("amount_net"), errors="coerce").fillna(0).sum()
+        proj_sum = pd.to_numeric(g.get("project_amount_net"), errors="coerce").fillna(0).sum()
+        split_sum = pd.to_numeric(g.get("split_amount"), errors="coerce").fillna(0).sum()
+        spots_sum = pd.to_numeric(g.get("spots"), errors="coerce").fillna(0).sum()
+        row = {
+            "id": str(cid),
+            "contract_id": str(cid),
+            "platform": first.get("platform", ""),
+            "client": first.get("client", ""),
+            "product": first.get("product", ""),
+            "sales": first.get("sales", ""),
+            "company": first.get("company", ""),
+            "start_date": start_min.strftime("%Y-%m-%d") if pd.notna(start_min) else "",
+            "end_date": end_max.strftime("%Y-%m-%d") if pd.notna(end_max) else "",
+            "seconds": _sheet_cell_json_safe(first.get("seconds", "")),
+            "spots": int(spots_sum) if spots_sum else 0,
+            "amount_net": _sheet_cell_json_safe(amount_sum),
+            "updated_at": first.get("updated_at", ""),
+            "seconds_type": first.get("seconds_type", ""),
+            "project_amount_net": _sheet_cell_json_safe(proj_sum),
+            "split_amount": _sheet_cell_json_safe(split_sum),
+            "region": "",
+            "detail_rows": int(len(g)),
+        }
+        rows.append(row)
+    cols = [
+        "id", "contract_id", "platform", "client", "product", "sales", "company",
+        "start_date", "end_date", "seconds", "spots", "amount_net", "updated_at",
+        "seconds_type", "project_amount_net", "split_amount", "region", "detail_rows",
+    ]
+    out = pd.DataFrame(rows)
+    for c in cols:
+        if c not in out.columns:
+            out[c] = ""
+    return out[cols].sort_values(["sales", "contract_id"], na_position="last").reset_index(drop=True)
 
 
 def _update_worksheet_with_clear_when_empty(ws, df: pd.DataFrame, fallback_header: list[str]) -> None:
@@ -764,6 +827,18 @@ def load_orders_from_sheets() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_orders_detail_from_sheets() -> pd.DataFrame:
+    try:
+        sh = _client()
+        if not sh:
+            return pd.DataFrame()
+        ws = sh.worksheet(WS_ORDERS_DETAIL)
+        rec = ws.get_all_records()
+        return _records_to_df(rec)
+    except Exception:
+        return pd.DataFrame()
+
+
 def load_segments_from_sheets() -> pd.DataFrame:
     try:
         sh = _client()
@@ -825,8 +900,9 @@ def load_users_from_sheets() -> pd.DataFrame:
 
 
 def write_orders_to_sheets(df: pd.DataFrame) -> str | None:
-    """寫入 orders 到 Google Sheet，成功回傳 None，失敗回傳錯誤訊息。"""
+    """寫入「合約主檔視圖」到 Orders（每個 contract_id 一列）。"""
     try:
+        df = _build_contract_orders_view(df)
         sh = _client()
         if not sh:
             return "未設定或未啟用 Google Sheet"
@@ -848,7 +924,60 @@ def write_orders_to_sheets(df: pd.DataFrame) -> str | None:
             return None
 
         vals = _df_to_values(df)
-        ws.update(vals, value_input_option="USER_ENTERED")
+        try:
+            ws.clear()
+            ws.update(vals, value_input_option="USER_ENTERED")
+        except Exception:
+            existing = ws.get_all_values() or []
+            nrows = max(len(existing), len(vals))
+            ncols = max((max((len(r) for r in existing), default=0)), (max((len(r) for r in vals), default=0)))
+            matrix = [[""] * ncols for _ in range(max(1, nrows))]
+            for i, row in enumerate(vals):
+                if i >= len(matrix):
+                    break
+                for j, v in enumerate(row[:ncols]):
+                    matrix[i][j] = v
+            ws.update(matrix, value_input_option="USER_ENTERED")
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def write_orders_detail_to_sheets(df: pd.DataFrame) -> str | None:
+    """寫入原始明細列到 Orders_Detail。"""
+    try:
+        sh = _client()
+        if not sh:
+            return "未設定或未啟用 Google Sheet"
+        _ensure_worksheets(sh)
+        ws = sh.worksheet(WS_ORDERS_DETAIL)
+        if df is None or df.empty:
+            header = (list(getattr(df, "columns", [])) if df is not None else [])
+            existing = ws.get_all_values() or []
+            if not existing:
+                ws.update([header] if header else [[""]], value_input_option="USER_ENTERED")
+                return None
+            ncols = max(len(existing[0]), len(header))
+            header_padded = header + [""] * (ncols - len(header))
+            blank_row = [""] * ncols
+            new_values = [header_padded] + [blank_row] * (max(0, len(existing) - 1))
+            ws.update(new_values, value_input_option="USER_ENTERED")
+            return None
+        vals = _df_to_values(df)
+        try:
+            ws.clear()
+            ws.update(vals, value_input_option="USER_ENTERED")
+        except Exception:
+            existing = ws.get_all_values() or []
+            nrows = max(len(existing), len(vals))
+            ncols = max((max((len(r) for r in existing), default=0)), (max((len(r) for r in vals), default=0)))
+            matrix = [[""] * ncols for _ in range(max(1, nrows))]
+            for i, row in enumerate(vals):
+                if i >= len(matrix):
+                    break
+                for j, v in enumerate(row[:ncols]):
+                    matrix[i][j] = v
+            ws.update(matrix, value_input_option="USER_ENTERED")
         return None
     except Exception as e:
         return str(e)
@@ -1176,6 +1305,7 @@ def sync_db_to_sheets(
     try:
         table_jobs = [
             (WS_ORDERS, lambda: pd.read_sql("SELECT * FROM orders", conn), write_orders_to_sheets),
+            (WS_ORDERS_DETAIL, lambda: pd.read_sql("SELECT * FROM orders", conn), write_orders_detail_to_sheets),
             (WS_SEGMENTS, lambda: pd.read_sql("SELECT * FROM ad_flight_segments", conn), write_segments_to_sheets),
             (WS_PLATFORM_SETTINGS, lambda: pd.read_sql("SELECT * FROM platform_settings", conn), write_platform_settings_to_sheets),
             (WS_CAPACITY, lambda: pd.read_sql("SELECT * FROM platform_monthly_capacity", conn), write_capacity_to_sheets),
@@ -1187,7 +1317,8 @@ def sync_db_to_sheets(
         allow = set(only_tables) if only_tables else None
         for name, loader, writer in table_jobs:
             if allow is not None and name not in allow:
-                continue
+                if not (name == WS_ORDERS_DETAIL and WS_ORDERS in allow):
+                    continue
             try:
                 df = loader()
                 if name == WS_ORDERS:
@@ -1265,6 +1396,30 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True, verify_after_cle
                 "region",
             ],
             write_orders_to_sheets,
+        ),
+        (
+            WS_ORDERS_DETAIL,
+            [
+                "id",
+                "platform",
+                "client",
+                "product",
+                "sales",
+                "company",
+                "start_date",
+                "end_date",
+                "seconds",
+                "spots",
+                "amount_net",
+                "updated_at",
+                "contract_id",
+                "seconds_type",
+                "project_amount_net",
+                "split_amount",
+                "hourly_schedule_json",
+                "region",
+            ],
+            write_orders_detail_to_sheets,
         ),
         (
             WS_SEGMENTS,
@@ -1368,6 +1523,30 @@ def clear_business_tables_in_sheets_with_report(
                 "region",
             ],
             write_orders_to_sheets,
+        ),
+        (
+            WS_ORDERS_DETAIL,
+            [
+                "id",
+                "platform",
+                "client",
+                "product",
+                "sales",
+                "company",
+                "start_date",
+                "end_date",
+                "seconds",
+                "spots",
+                "amount_net",
+                "updated_at",
+                "contract_id",
+                "seconds_type",
+                "project_amount_net",
+                "split_amount",
+                "hourly_schedule_json",
+                "region",
+            ],
+            write_orders_detail_to_sheets,
         ),
         (
             WS_SEGMENTS,
@@ -1501,7 +1680,9 @@ def load_all_from_sheets_into_db(get_db_connection, init_db) -> list[str]:
 
     try:
         # Orders
-        df = load_orders_from_sheets()
+        df = load_orders_detail_from_sheets()
+        if df.empty:
+            df = load_orders_from_sheets()
         if not df.empty and "id" in df.columns:
             try:
                 run_sql("DELETE FROM orders")
@@ -1510,13 +1691,15 @@ def load_all_from_sheets_into_db(get_db_connection, init_db) -> list[str]:
             for _, row in df.iterrows():
                 try:
                     conn.execute("""
-                        INSERT OR REPLACE INTO orders (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        INSERT OR REPLACE INTO orders
+                        (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         row.get("id"), row.get("platform"), row.get("client"), row.get("product"), row.get("sales"), row.get("company"),
                         row.get("start_date"), row.get("end_date"),
                         _int(row.get("seconds")), _int(row.get("spots")), _float(row.get("amount_net")), row.get("updated_at"),
-                        row.get("contract_id"), row.get("seconds_type"), _float(row.get("project_amount_net")), _float(row.get("split_amount"))
+                        row.get("contract_id"), row.get("seconds_type"), _float(row.get("project_amount_net")), _float(row.get("split_amount")),
+                        row.get("hourly_schedule_json"), row.get("region")
                     ))
                     conn.commit()
                 except Exception as e:
