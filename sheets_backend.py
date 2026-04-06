@@ -79,6 +79,7 @@ SCOPES = [
 # 供同步失敗時顯示 _client() 無法連線的具體原因
 _last_client_error: str | None = None
 _last_table_signatures: dict[str, str] = {}
+_HOUR_PRIORITY_FALLBACK = [8, 16, 22, 12, 20, 10, 18, 13, 15, 9, 14, 21, 11, 17, 19, 0, 7, 6, 23, 1]
 
 
 def get_last_client_error() -> str | None:
@@ -353,6 +354,25 @@ def _build_contract_orders_view(df: pd.DataFrame) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = ""
     return out[cols].sort_values(["sales", "contract_id"], na_position="last").reset_index(drop=True)
+
+
+def _fallback_schedule_map_from_spots(spots: Any) -> dict[str, int]:
+    try:
+        n = int(float(spots))
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return {}
+    alloc: dict[int, int] = {h: 0 for h in _HOUR_PRIORITY_FALLBACK}
+    idx = 0
+    while n > 0:
+        h = _HOUR_PRIORITY_FALLBACK[idx % len(_HOUR_PRIORITY_FALLBACK)]
+        alloc[h] = int(alloc.get(h, 0)) + 1
+        n -= 1
+        idx += 1
+        if idx > 3000:
+            break
+    return {str(h): int(v) for h, v in alloc.items() if v > 0}
 
 
 def _update_worksheet_with_clear_when_empty(ws, df: pd.DataFrame, fallback_header: list[str]) -> None:
@@ -735,6 +755,8 @@ def _build_template_sheet_rows(
                     schedule_map = j
         except Exception:
             schedule_map = {}
+        if not schedule_map:
+            schedule_map = _fallback_schedule_map_from_spots(spots)
         for hh in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]:
             v = schedule_map.get(str(hh))
             if v in (None, "", 0, "0"):
@@ -1321,6 +1343,14 @@ def sync_db_to_sheets(
     errors = []
     conn = get_db_connection()
     try:
+        # 保底 migration：舊 DB 可能尚未有 hourly_schedule_json 欄位。
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+            if "hourly_schedule_json" not in cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
+                conn.commit()
+        except Exception:
+            pass
         table_jobs = [
             (WS_ORDERS, lambda: pd.read_sql("SELECT * FROM orders", conn), write_orders_to_sheets),
             (WS_ORDERS_DETAIL, lambda: pd.read_sql("SELECT * FROM orders", conn), write_orders_detail_to_sheets),
