@@ -168,6 +168,26 @@ def _load_existing_order_id_map(get_db_connection: Callable[[], object]) -> dict
     return mapping
 
 
+def _ensure_orders_hourly_schedule_column(get_db_connection: Callable[[], object]) -> None:
+    """保底 migration：舊 DB 若缺 hourly_schedule_json，匯入前自動補欄。"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
+        if "hourly_schedule_json" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
+            conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def _norm_text(v) -> str:
     return str(v or "").strip()
 
@@ -1484,6 +1504,7 @@ def import_ragic_to_orders_by_date_range_service(
 
     _emit("db_write_start", f"開始寫入本地資料庫：{len(order_rows)} 筆")
     init_db()
+    _ensure_orders_hourly_schedule_column(get_db_connection)
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -1510,13 +1531,23 @@ def import_ragic_to_orders_by_date_range_service(
                 )
 
         existing_rows: dict[str, dict] = {}
-        df_existing = pd.read_sql(
-            """
-            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
-            FROM orders
-            """,
-            conn,
-        )
+        try:
+            df_existing = pd.read_sql(
+                """
+                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
+                FROM orders
+                """,
+                conn,
+            )
+        except Exception:
+            df_existing = pd.read_sql(
+                """
+                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, region
+                FROM orders
+                """,
+                conn,
+            )
+            df_existing["hourly_schedule_json"] = ""
         if not df_existing.empty:
             for _, rr in df_existing.iterrows():
                 oid = _norm_text(rr.get("id", ""))
@@ -1798,6 +1829,7 @@ def import_ragic_single_entry_to_orders_service(
         return False, "此筆 Ragic 沒有可匯入的有效資料（皆未通過可產生 segment 條件）。", batch_id, push_detail
 
     init_db()
+    _ensure_orders_hourly_schedule_column(get_db_connection)
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -1826,13 +1858,23 @@ def import_ragic_single_entry_to_orders_service(
                 )
 
         existing_rows: dict[str, dict] = {}
-        df_existing = pd.read_sql(
-            """
-            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
-            FROM orders
-            """,
-            conn,
-        )
+        try:
+            df_existing = pd.read_sql(
+                """
+                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
+                FROM orders
+                """,
+                conn,
+            )
+        except Exception:
+            df_existing = pd.read_sql(
+                """
+                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, region
+                FROM orders
+                """,
+                conn,
+            )
+            df_existing["hourly_schedule_json"] = ""
         if not df_existing.empty:
             for _, rr in df_existing.iterrows():
                 oid = _norm_text(rr.get("id", ""))
