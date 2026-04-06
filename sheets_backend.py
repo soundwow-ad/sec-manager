@@ -1005,7 +1005,20 @@ def write_segments_to_sheets(df: pd.DataFrame) -> str | None:
             return None
 
         vals = _df_to_values(df)
-        ws.update(vals, value_input_option="USER_ENTERED")
+        try:
+            ws.clear()
+            ws.update(vals, value_input_option="USER_ENTERED")
+        except Exception:
+            existing = ws.get_all_values() or []
+            nrows = max(len(existing), len(vals))
+            ncols = max((max((len(r) for r in existing), default=0)), (max((len(r) for r in vals), default=0)))
+            matrix = [[""] * ncols for _ in range(max(1, nrows))]
+            for i, row in enumerate(vals):
+                if i >= len(matrix):
+                    break
+                for j, v in enumerate(row[:ncols]):
+                    matrix[i][j] = v
+            ws.update(matrix, value_input_option="USER_ENTERED")
         return None
     except Exception as e:
         return str(e)
