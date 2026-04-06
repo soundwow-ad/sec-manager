@@ -1,4 +1,5 @@
 import pandas as pd
+import json
 import numpy as np
 import calendar
 from datetime import datetime, timedelta
@@ -347,10 +348,11 @@ def build_table1_from_segments(
         conn = get_db_connection_fn()
         try:
             try:
-                df_orders_info = pd.read_sql("SELECT id, updated_at, contract_id FROM orders", conn)
+                df_orders_info = pd.read_sql("SELECT id, updated_at, contract_id, hourly_schedule_json FROM orders", conn)
             except Exception:
                 df_orders_info = pd.read_sql("SELECT id, updated_at FROM orders", conn)
                 df_orders_info["contract_id"] = None
+                df_orders_info["hourly_schedule_json"] = ""
             conn.close()
             df = df.merge(df_orders_info, left_on="source_order_id", right_on="id", how="left", suffixes=("", "_order"))
             df["提交日"] = pd.to_datetime(df["updated_at"], errors="coerce").dt.strftime("%Y/%m/%d")
@@ -405,6 +407,21 @@ def build_table1_from_segments(
         }
         for hour in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]:
             base_row[str(hour)] = ""
+        try:
+            schedule_map = json.loads(str(row.get("hourly_schedule_json") or "{}"))
+            if isinstance(schedule_map, dict):
+                for hour in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]:
+                    v = schedule_map.get(str(hour))
+                    if v is None:
+                        continue
+                    try:
+                        iv = int(v)
+                    except Exception:
+                        continue
+                    if iv > 0:
+                        base_row[str(hour)] = iv
+        except Exception:
+            pass
         base_row["每天總檔次"] = int(df.loc[idx, "每天總檔次"])
         base_row["委刊總檔數"] = int(df.loc[idx, "委刊總檔數"])
         base_row["總秒數"] = int(df.loc[idx, "總秒數"])
@@ -476,10 +493,12 @@ def build_excel_table1_view(
 ) -> pd.DataFrame:
     if use_segments:
         if df_segments is not None and not df_segments.empty:
-            cols = ["id", "updated_at", "contract_id"] if "contract_id" in df_orders.columns else ["id", "updated_at"]
+            cols = ["id", "updated_at", "contract_id", "hourly_schedule_json"] if "contract_id" in df_orders.columns else ["id", "updated_at", "hourly_schedule_json"]
             info = df_orders[cols].copy() if all(c in df_orders.columns for c in cols) else df_orders[["id", "updated_at"]].copy()
             if "contract_id" not in info.columns:
                 info["contract_id"] = None
+            if "hourly_schedule_json" not in info.columns:
+                info["hourly_schedule_json"] = ""
             return build_table1_from_segments_fn(
                 df_segments,
                 custom_settings,

@@ -657,6 +657,21 @@ def _build_template_sheet_rows(
         put(row_vals, "合約編號", contract_id)
         put(row_vals, "實收金額", amount_net)
         put(row_vals, "除佣實收", amount_net)
+        # 時段排程：從 orders.hourly_schedule_json 反映到模板 6~1 欄
+        schedule_map: dict[str, Any] = {}
+        try:
+            raw_sched = row.get("hourly_schedule_json", "")
+            if isinstance(raw_sched, str) and raw_sched.strip():
+                j = json.loads(raw_sched)
+                if isinstance(j, dict):
+                    schedule_map = j
+        except Exception:
+            schedule_map = {}
+        for hh in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]:
+            v = schedule_map.get(str(hh))
+            if v in (None, "", 0, "0"):
+                continue
+            put(row_vals, str(hh), v)
 
         if layout_meta is not None:
             s_ts = pd.to_datetime(start_date, errors="coerce")
@@ -693,6 +708,19 @@ def _write_template_style_tabs(
     ws_s = sh.worksheet(WS_T1_TEMPLATE_SEGMENTS)
 
     layout_meta = _prepare_template_layout_meta(layout_rows, headers)
+    if (
+        df_segments is not None
+        and not df_segments.empty
+        and df_orders is not None
+        and not df_orders.empty
+        and "hourly_schedule_json" in df_orders.columns
+        and "source_order_id" in df_segments.columns
+    ):
+        try:
+            sched_map = df_orders[["id", "hourly_schedule_json"]].rename(columns={"id": "source_order_id"})
+            df_segments = df_segments.merge(sched_map, on="source_order_id", how="left")
+        except Exception:
+            pass
     rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders", layout_meta=layout_meta)
     rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments", layout_meta=layout_meta)
     values_o = _sanitize_sheet_matrix(layout_rows + rows_o)
@@ -1233,6 +1261,7 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True, verify_after_cle
                 "seconds_type",
                 "project_amount_net",
                 "split_amount",
+                "hourly_schedule_json",
                 "region",
             ],
             write_orders_to_sheets,
@@ -1335,6 +1364,7 @@ def clear_business_tables_in_sheets_with_report(
                 "seconds_type",
                 "project_amount_net",
                 "split_amount",
+                "hourly_schedule_json",
                 "region",
             ],
             write_orders_to_sheets,

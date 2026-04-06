@@ -13,6 +13,9 @@ from typing import Callable
 import pandas as pd
 
 SECONDS_MGMT_REMARK_MAX = 60000
+HOUR_COLUMNS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]
+HOUR_PRIORITY = [8, 16, 22, 12, 20, 10, 18, 13, 15, 9, 14, 21, 11, 17, 19, 0, 7]
+PEAK_HOUR_CAPS = {7: 4, 8: 4, 11: 4, 12: 4, 17: 4, 18: 4}
 
 
 def _log_ragic_import(
@@ -192,6 +195,7 @@ def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
         _norm_text(effective_seconds_type),
         _norm_num(r.get("project_amount_net", 0)),
         _norm_num(r.get("split_amount", 0)),
+        _norm_text(r.get("hourly_schedule_json", "")),
         _norm_text(r.get("region", "")),
     )
 
@@ -199,7 +203,8 @@ def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
 def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
     project_val = t[14] if len(t) > 14 else None
     split_val = t[15] if len(t) > 15 else None
-    region_val = t[16] if len(t) > 16 else ""
+    schedule_val = t[16] if len(t) > 16 else ""
+    region_val = t[17] if len(t) > 17 else ""
     return (
         _norm_text(t[1]),
         _norm_text(t[2]),
@@ -215,8 +220,88 @@ def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
         _norm_text(effective_seconds_type),
         _norm_num(project_val),
         _norm_num(split_val),
+        _norm_text(schedule_val),
         _norm_text(region_val),
     )
+
+
+def _normalize_allowed_hours(hours: list[int] | None) -> list[int]:
+    out: list[int] = []
+    for h in list(hours or []):
+        try:
+            hh = int(h)
+        except Exception:
+            continue
+        if 0 <= hh <= 23 and hh not in out:
+            out.append(hh)
+    return out
+
+
+def _is_hour_schedule_target(platform_text: str) -> bool:
+    s = str(platform_text or "")
+    return ("全家" in s and "廣播" in s) or ("新鮮視" in s)
+
+
+def _hour_priority_for_allowed(allowed_hours: list[int]) -> list[int]:
+    allowed = _normalize_allowed_hours(allowed_hours)
+    if not allowed:
+        allowed = list(HOUR_COLUMNS)
+    ordered: list[int] = []
+    for h in HOUR_PRIORITY:
+        if h in allowed and h not in ordered:
+            ordered.append(h)
+    for h in allowed:
+        if h not in ordered:
+            ordered.append(h)
+    return ordered
+
+
+def _allocate_hourly_schedule(
+    *,
+    spots_per_day: int,
+    dates: list[str],
+    allowed_hours: list[int],
+    contract_day_hour_usage: dict[str, dict[int, int]],
+) -> dict[str, int]:
+    if int(spots_per_day or 0) <= 0:
+        return {}
+    allowed = _hour_priority_for_allowed(allowed_hours)
+    if not allowed:
+        return {}
+    per_row: dict[int, int] = {h: 0 for h in allowed}
+    remain = int(spots_per_day)
+    safety = 0
+    while remain > 0 and safety < 2000:
+        safety += 1
+        progressed = False
+        for h in allowed:
+            blocked = False
+            cap = PEAK_HOUR_CAPS.get(h)
+            if cap is not None:
+                for d in dates:
+                    used = int(contract_day_hour_usage.get(str(d), {}).get(h, 0))
+                    if used + per_row.get(h, 0) >= cap:
+                        blocked = True
+                        break
+            if blocked:
+                continue
+            per_row[h] = per_row.get(h, 0) + 1
+            remain -= 1
+            progressed = True
+            if remain <= 0:
+                break
+        if progressed:
+            continue
+        # 全部受限時，退而求其次塞到目前最少的可播時段
+        best_h = min(allowed, key=lambda x: per_row.get(x, 0))
+        per_row[best_h] = per_row.get(best_h, 0) + 1
+        remain -= 1
+    for d in dates:
+        day_use = contract_day_hour_usage.setdefault(str(d), {})
+        for h, n in per_row.items():
+            if n > 0:
+                day_use[h] = int(day_use.get(h, 0)) + int(n)
+    return {str(h): int(per_row.get(h, 0)) for h in HOUR_COLUMNS if per_row.get(h, 0) > 0}
 
 
 def _ragic_get_field(entry: dict, name: str, ragic_fields: dict):
@@ -836,6 +921,7 @@ def _ragic_entry_collect_order_rows(
         return [], state
 
     rows_out: list[tuple[str, tuple]] = []
+    contract_day_hour_usage: dict[str, dict[int, int]] = {}
 
     st_sub = dict(ragic_subtable_fields or {})
     fid_material = st_sub.get("素材_廣告檔名") or st_sub.get("廣告檔名")
@@ -1109,6 +1195,19 @@ def _ragic_entry_collect_order_rows(
                         spots=spots,
                         region=region,
                     )
+                    group_dates = [str(x) for x in (group.get("dates") or [])]
+                    schedule_json = ""
+                    if _is_hour_schedule_target(platform_for_order):
+                        allowed_hours = _normalize_allowed_hours(u.get("allowed_hours"))
+                        schedule_map = _allocate_hourly_schedule(
+                            spots_per_day=int(spots),
+                            dates=group_dates,
+                            allowed_hours=allowed_hours,
+                            contract_day_hour_usage=contract_day_hour_usage,
+                        )
+                        if schedule_map:
+                            schedule_json = json.dumps(schedule_map, ensure_ascii=False, separators=(",", ":"))
+
                     rows_out.append(
                         (
                             rid_s,
@@ -1129,6 +1228,7 @@ def _ragic_entry_collect_order_rows(
                                 ragic_seconds_type,
                                 project_amount if project_amount and project_amount > 0 else None,
                                 None,
+                                schedule_json,
                                 region,
                             ),
                         )
@@ -1158,6 +1258,7 @@ def _ragic_entry_collect_order_rows(
                         "走期天數": g_days,
                         "區域": region,
                         "媒體平台": platform_for_order,
+                        "時段排程": schedule_json,
                     }
                     col_order = [
                         "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
@@ -1174,6 +1275,7 @@ def _ragic_entry_collect_order_rows(
                     state["imported_summaries"].append(
                         f"order_id={order_id} | 平台={platform_for_order} | 素材={prod_name!s} | {seconds}秒 | "
                         f"代表檔次≈{spots}/日 | 秒數用途={ragic_seconds_type or '（空白）'} | 走期={start_date_norm}~{end_date_norm} | "
+                        f"時段排程={schedule_json or '（未排）'} | "
                         f"{daily_detail} | sheet={u.get('source_sheet', '')!s}"
                     )
 
@@ -1410,7 +1512,7 @@ def import_ragic_to_orders_by_date_range_service(
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
             """
-            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, region
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
             FROM orders
             """,
             conn,
@@ -1442,8 +1544,8 @@ def import_ragic_to_orders_by_date_range_service(
         c.executemany(
             """
             INSERT INTO orders
-            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, region)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 platform=excluded.platform,
                 client=excluded.client,
@@ -1460,6 +1562,7 @@ def import_ragic_to_orders_by_date_range_service(
                 seconds_type=excluded.seconds_type,
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
+                hourly_schedule_json=excluded.hourly_schedule_json,
                 region=excluded.region
             WHERE
                 COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
@@ -1476,6 +1579,7 @@ def import_ragic_to_orders_by_date_range_service(
                 OR COALESCE(orders.seconds_type, '') != COALESCE(excluded.seconds_type, '')
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
+                OR COALESCE(orders.hourly_schedule_json, '') != COALESCE(excluded.hourly_schedule_json, '')
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
             """,
             order_rows,
@@ -1724,7 +1828,7 @@ def import_ragic_single_entry_to_orders_service(
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
             """
-            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, region
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
             FROM orders
             """,
             conn,
@@ -1756,8 +1860,8 @@ def import_ragic_single_entry_to_orders_service(
         c.executemany(
             """
             INSERT INTO orders
-            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, region)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 platform=excluded.platform,
                 client=excluded.client,
@@ -1774,6 +1878,7 @@ def import_ragic_single_entry_to_orders_service(
                 seconds_type=excluded.seconds_type,
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
+                hourly_schedule_json=excluded.hourly_schedule_json,
                 region=excluded.region
             WHERE
                 COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
@@ -1790,6 +1895,7 @@ def import_ragic_single_entry_to_orders_service(
                 OR COALESCE(orders.seconds_type, '') != COALESCE(excluded.seconds_type, '')
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
+                OR COALESCE(orders.hourly_schedule_json, '') != COALESCE(excluded.hourly_schedule_json, '')
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
             """,
             order_rows,

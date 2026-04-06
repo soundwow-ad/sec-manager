@@ -1898,6 +1898,28 @@ def parse_cue_excel_for_table1(
             structural_reports_out=cue_structural_reports,
         )
         if result:
+            try:
+                excel_probe = io.BytesIO(file_content)
+                x_probe = pd.ExcelFile(excel_probe, engine="openpyxl")
+                sheet_hours: dict[str, list[int]] = {}
+                for sn in x_probe.sheet_names:
+                    try:
+                        excel_probe.seek(0)
+                        df_probe = pd.read_excel(excel_probe, sheet_name=sn, header=None, engine="openpyxl", nrows=180)
+                        sheet_hours[sn] = _hours_from_time_window(_extract_time_window_from_sheet(df_probe))
+                    except Exception:
+                        sheet_hours[sn] = []
+                try:
+                    x_probe.close()
+                except Exception:
+                    pass
+                for ad_unit in result:
+                    if ad_unit.get("allowed_hours"):
+                        continue
+                    sn = str(ad_unit.get("source_sheet") or "")
+                    ad_unit["allowed_hours"] = list(sheet_hours.get(sn, []))
+            except Exception:
+                pass
             if order_info:
                 for ad_unit in result:
                     ad_unit.update(
@@ -1962,6 +1984,8 @@ def parse_cue_excel_for_table1(
                 platform_info = _extract_platform_from_sheet(df, sheet_name)
                 cue_sheet_company, cue_sheet_sales = extract_cue_sheet_company_sales(df, sheet_name)
                 seconds_info = _extract_seconds_from_sheet(df, sheet_name)
+                time_window = _extract_time_window_from_sheet(df)
+                allowed_hours = _hours_from_time_window(time_window)
                 daily_spots_rows = _extract_daily_spots_rows(df, sheet_name, sheet_date_range)
 
                 for spots_row in daily_spots_rows:
@@ -1990,6 +2014,7 @@ def parse_cue_excel_for_table1(
                             "split_groups": [group],
                             "cue_sheet_company": cue_sheet_company,
                             "cue_sheet_sales": cue_sheet_sales,
+                            "allowed_hours": allowed_hours,
                         }
                         if order_info:
                             ad_unit.update(
@@ -2079,6 +2104,49 @@ def _extract_seconds_from_sheet(df, sheet_name):
                 except Exception:
                     pass
     return {"seconds": 0}
+
+
+def _extract_time_window_from_sheet(df) -> tuple[int, int] | None:
+    """嘗試從工作表文字擷取時段區間（start_hour, end_hour）。"""
+    if df is None or df.empty:
+        return None
+    starts: list[int] = []
+    ends: list[int] = []
+    scan_rows = min(120, len(df))
+    scan_cols = min(12, df.shape[1])
+    for r in range(scan_rows):
+        for c in range(scan_cols):
+            try:
+                s = str(df.iat[r, c] if c < df.shape[1] else "").strip()
+            except Exception:
+                s = ""
+            if not s or s.lower() == "nan":
+                continue
+            for m in re.finditer(r"(?<!\d)(\d{1,2})(?::\d{1,2})?\s*[-~～到至]\s*(\d{1,2})(?::\d{1,2})?(?!\d)", s):
+                try:
+                    st = int(m.group(1))
+                    ed = int(m.group(2))
+                except Exception:
+                    continue
+                if 0 <= st <= 24 and 0 <= ed <= 24 and st != ed:
+                    starts.append(st)
+                    ends.append(ed)
+    if not starts or not ends:
+        return None
+    start_h = max(0, min(starts))
+    end_h = min(24, max(ends))
+    if end_h <= start_h:
+        return None
+    return start_h, end_h
+
+
+def _hours_from_time_window(window: tuple[int, int] | None) -> list[int]:
+    if not window:
+        return []
+    st, ed = window
+    if ed <= st:
+        return []
+    return [h for h in range(st, ed) if 0 <= h <= 23]
 
 
 def _extract_daily_spots_rows(df, sheet_name, date_range=None):
