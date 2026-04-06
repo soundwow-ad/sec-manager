@@ -671,10 +671,15 @@ def _build_template_sheet_rows(
     if not headers:
         return []
     idx = {h: i for i, h in enumerate(headers)}
+    idx_norm = {str(h).strip().replace(".0", ""): i for i, h in enumerate(headers)}
 
     def put(row_vals: list[Any], key: str, val: Any) -> None:
         if key in idx:
             row_vals[idx[key]] = _sheet_cell_json_safe(val)
+            return
+        nk = str(key).strip().replace(".0", "")
+        if nk in idx_norm:
+            row_vals[idx_norm[nk]] = _sheet_cell_json_safe(val)
 
     rows_out: list[list[Any]] = []
     for _, r in df_src.iterrows():
@@ -723,7 +728,7 @@ def _build_template_sheet_rows(
         # 時段排程：從 orders.hourly_schedule_json 反映到模板 6~1 欄
         schedule_map: dict[str, Any] = {}
         try:
-            raw_sched = row.get("hourly_schedule_json", "")
+            raw_sched = r.get("hourly_schedule_json", "")
             if isinstance(raw_sched, str) and raw_sched.strip():
                 j = json.loads(raw_sched)
                 if isinstance(j, dict):
