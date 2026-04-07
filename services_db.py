@@ -30,6 +30,12 @@ def init_db(*, get_db_connection, hash_password):
             if "hourly_schedule_json" not in current_cols:
                 c.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
                 conn.commit()
+            if "play_time_window" not in current_cols:
+                c.execute("ALTER TABLE orders ADD COLUMN play_time_window TEXT")
+                conn.commit()
+            if "special_time_window" not in current_cols:
+                c.execute("ALTER TABLE orders ADD COLUMN special_time_window INTEGER")
+                conn.commit()
             if "region" not in current_cols:
                 c.execute("ALTER TABLE orders ADD COLUMN region TEXT")
                 conn.commit()
@@ -42,6 +48,8 @@ def init_db(*, get_db_connection, hash_password):
                 start_date TEXT, end_date TEXT, seconds INTEGER, spots INTEGER, amount_net REAL,
                 updated_at TIMESTAMP, contract_id TEXT, seconds_type TEXT, project_amount_net REAL, split_amount REAL,
                 hourly_schedule_json TEXT,
+                play_time_window TEXT,
+                special_time_window INTEGER,
                 region TEXT
             )
         """

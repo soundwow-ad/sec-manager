@@ -174,7 +174,7 @@ def _load_existing_order_id_map(get_db_connection: Callable[[], object]) -> dict
 
 
 def _ensure_orders_hourly_schedule_column(get_db_connection: Callable[[], object]) -> None:
-    """保底 migration：舊 DB 若缺 hourly_schedule_json，匯入前自動補欄。"""
+    """保底 migration：舊 DB 若缺排程/時段欄位，匯入前自動補欄。"""
     conn = None
     try:
         conn = get_db_connection()
@@ -182,6 +182,12 @@ def _ensure_orders_hourly_schedule_column(get_db_connection: Callable[[], object
         cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
         if "hourly_schedule_json" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
+            conn.commit()
+        if "play_time_window" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN play_time_window TEXT")
+            conn.commit()
+        if "special_time_window" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN special_time_window INTEGER")
             conn.commit()
     except Exception:
         pass
@@ -221,6 +227,8 @@ def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
         _norm_num(r.get("project_amount_net", 0)),
         _norm_num(r.get("split_amount", 0)),
         _norm_text(r.get("hourly_schedule_json", "")),
+        _norm_text(r.get("play_time_window", "")),
+        int(_norm_num(r.get("special_time_window", 0))),
         _norm_text(r.get("region", "")),
     )
 
@@ -229,7 +237,9 @@ def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
     project_val = t[14] if len(t) > 14 else None
     split_val = t[15] if len(t) > 15 else None
     schedule_val = t[16] if len(t) > 16 else ""
-    region_val = t[17] if len(t) > 17 else ""
+    play_window_val = t[17] if len(t) > 17 else ""
+    special_window_val = t[18] if len(t) > 18 else 0
+    region_val = t[19] if len(t) > 19 else ""
     return (
         _norm_text(t[1]),
         _norm_text(t[2]),
@@ -246,6 +256,8 @@ def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
         _norm_num(project_val),
         _norm_num(split_val),
         _norm_text(schedule_val),
+        _norm_text(play_window_val),
+        int(_norm_num(special_window_val)),
         _norm_text(region_val),
     )
 
@@ -265,6 +277,32 @@ def _normalize_allowed_hours(hours: list[int] | None) -> list[int]:
 def _is_hour_schedule_target(platform_text: str) -> bool:
     s = str(platform_text or "")
     return ("全家" in s and "廣播" in s) or ("新鮮視" in s)
+
+
+def _default_allowed_hours_for_platform(platform_text: str) -> list[int]:
+    s = str(platform_text or "")
+    if ("全家" in s and "廣播" in s) or ("企頻" in s):
+        return list(range(7, 23))  # 07-23
+    if "新鮮視" in s:
+        return list(range(6, 24))  # 06-24
+    return []
+
+
+def _window_label_from_hours(hours: list[int]) -> str:
+    hh = sorted(set(int(x) for x in hours if 0 <= int(x) <= 23))
+    if not hh:
+        return ""
+    return f"{min(hh):02d}-{(max(hh) + 1):02d}"
+
+
+def _effective_window_for_unit(u: dict, platform_text: str) -> tuple[list[int], str, int]:
+    parsed = _normalize_allowed_hours(u.get("allowed_hours"))
+    default = _default_allowed_hours_for_platform(platform_text)
+    if not parsed:
+        return default, "", 0
+    if default and parsed == default:
+        return default, "", 0
+    return parsed, _window_label_from_hours(parsed), 1
 
 
 def _hour_priority_for_allowed(allowed_hours: list[int]) -> list[int]:
@@ -1240,8 +1278,10 @@ def _ragic_entry_collect_order_rows(
                     )
                     group_dates = [str(x) for x in (group.get("dates") or [])]
                     schedule_json = ""
+                    play_time_window = ""
+                    special_time_window = 0
                     if _is_hour_schedule_target(platform_for_order):
-                        allowed_hours = _normalize_allowed_hours(u.get("allowed_hours"))
+                        allowed_hours, play_time_window, special_time_window = _effective_window_for_unit(u, platform_for_order)
                         schedule_map = _allocate_hourly_schedule(
                             spots_per_day=int(spots),
                             dates=group_dates,
@@ -1272,6 +1312,8 @@ def _ragic_entry_collect_order_rows(
                                 project_amount if project_amount and project_amount > 0 else None,
                                 None,
                                 schedule_json,
+                                play_time_window,
+                                special_time_window,
                                 region,
                             ),
                         )
@@ -1301,12 +1343,14 @@ def _ragic_entry_collect_order_rows(
                         "走期天數": g_days,
                         "區域": region,
                         "媒體平台": platform_for_order,
+                        "播出時段": play_time_window,
+                        "特殊時段": "是" if int(special_time_window or 0) == 1 else "否",
                         "時段排程": schedule_json,
                     }
                     col_order = [
                         "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
                         "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
-                        "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
+                        "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台", "播出時段", "特殊時段",
                     ]
                     row_text = " | ".join(f"{k}={detail_row.get(k, '')}" for k in col_order)
                     state["uploaded_rows_detail"].append(
@@ -1315,10 +1359,13 @@ def _ragic_entry_collect_order_rows(
                     ds_seg = group.get("dates") or []
                     ds_part = [f"{d}:{sp}檔" for d, sp in zip(ds_seg, ds_list)] if ds_seg and ds_list else []
                     daily_detail = "；".join(ds_part) if ds_part else str(ds_list)
+                    special_window_part = (
+                        f"特殊播出時段={play_time_window} | " if int(special_time_window or 0) == 1 and play_time_window else ""
+                    )
                     state["imported_summaries"].append(
                         f"order_id={order_id} | 平台={platform_for_order} | 素材={prod_name!s} | {seconds}秒 | "
                         f"代表檔次≈{spots}/日 | 秒數用途={ragic_seconds_type or '（空白）'} | 走期={start_date_norm}~{end_date_norm} | "
-                        f"時段排程={schedule_json or '（未排）'} | "
+                        f"{special_window_part}時段排程={schedule_json or '（未排）'} | "
                         f"{daily_detail} | sheet={u.get('source_sheet', '')!s}"
                     )
 
@@ -1557,7 +1604,7 @@ def import_ragic_to_orders_by_date_range_service(
         try:
             df_existing = pd.read_sql(
                 """
-                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, play_time_window, special_time_window, region
                 FROM orders
                 """,
                 conn,
@@ -1571,6 +1618,8 @@ def import_ragic_to_orders_by_date_range_service(
                 conn,
             )
             df_existing["hourly_schedule_json"] = ""
+            df_existing["play_time_window"] = ""
+            df_existing["special_time_window"] = 0
         if not df_existing.empty:
             for _, rr in df_existing.iterrows():
                 oid = _norm_text(rr.get("id", ""))
@@ -1598,8 +1647,8 @@ def import_ragic_to_orders_by_date_range_service(
         c.executemany(
             """
             INSERT INTO orders
-            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, play_time_window, special_time_window, region)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 platform=excluded.platform,
                 client=excluded.client,
@@ -1617,6 +1666,8 @@ def import_ragic_to_orders_by_date_range_service(
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
                 hourly_schedule_json=excluded.hourly_schedule_json,
+                play_time_window=excluded.play_time_window,
+                special_time_window=excluded.special_time_window,
                 region=excluded.region
             WHERE
                 COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
@@ -1634,6 +1685,8 @@ def import_ragic_to_orders_by_date_range_service(
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
                 OR COALESCE(orders.hourly_schedule_json, '') != COALESCE(excluded.hourly_schedule_json, '')
+                OR COALESCE(orders.play_time_window, '') != COALESCE(excluded.play_time_window, '')
+                OR COALESCE(orders.special_time_window, 0) != COALESCE(excluded.special_time_window, 0)
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
             """,
             order_rows,
@@ -1884,7 +1937,7 @@ def import_ragic_single_entry_to_orders_service(
         try:
             df_existing = pd.read_sql(
                 """
-                SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, play_time_window, special_time_window, region
                 FROM orders
                 """,
                 conn,
@@ -1898,6 +1951,8 @@ def import_ragic_single_entry_to_orders_service(
                 conn,
             )
             df_existing["hourly_schedule_json"] = ""
+            df_existing["play_time_window"] = ""
+            df_existing["special_time_window"] = 0
         if not df_existing.empty:
             for _, rr in df_existing.iterrows():
                 oid = _norm_text(rr.get("id", ""))
@@ -1925,8 +1980,8 @@ def import_ragic_single_entry_to_orders_service(
         c.executemany(
             """
             INSERT INTO orders
-            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, play_time_window, special_time_window, region)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 platform=excluded.platform,
                 client=excluded.client,
@@ -1944,6 +1999,8 @@ def import_ragic_single_entry_to_orders_service(
                 project_amount_net=excluded.project_amount_net,
                 split_amount=excluded.split_amount,
                 hourly_schedule_json=excluded.hourly_schedule_json,
+                play_time_window=excluded.play_time_window,
+                special_time_window=excluded.special_time_window,
                 region=excluded.region
             WHERE
                 COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
@@ -1961,6 +2018,8 @@ def import_ragic_single_entry_to_orders_service(
                 OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                 OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
                 OR COALESCE(orders.hourly_schedule_json, '') != COALESCE(excluded.hourly_schedule_json, '')
+                OR COALESCE(orders.play_time_window, '') != COALESCE(excluded.play_time_window, '')
+                OR COALESCE(orders.special_time_window, 0) != COALESCE(excluded.special_time_window, 0)
                 OR COALESCE(orders.region, '') != COALESCE(excluded.region, '')
             """,
             order_rows,

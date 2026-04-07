@@ -340,6 +340,8 @@ def _build_contract_orders_view(df: pd.DataFrame) -> pd.DataFrame:
             "seconds_type": first.get("seconds_type", ""),
             "project_amount_net": _sheet_cell_json_safe(proj_sum),
             "split_amount": _sheet_cell_json_safe(split_sum),
+            "play_time_window": first.get("play_time_window", ""),
+            "special_time_window": _sheet_cell_json_safe(first.get("special_time_window", 0)),
             "region": "",
             "detail_rows": int(len(g)),
         }
@@ -347,7 +349,7 @@ def _build_contract_orders_view(df: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "id", "contract_id", "platform", "client", "product", "sales", "company",
         "start_date", "end_date", "seconds", "spots", "amount_net", "updated_at",
-        "seconds_type", "project_amount_net", "split_amount", "region", "detail_rows",
+        "seconds_type", "project_amount_net", "split_amount", "play_time_window", "special_time_window", "region", "detail_rows",
     ]
     out = pd.DataFrame(rows)
     for c in cols:
@@ -1349,6 +1351,12 @@ def sync_db_to_sheets(
             if "hourly_schedule_json" not in cols:
                 conn.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
                 conn.commit()
+            if "play_time_window" not in cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN play_time_window TEXT")
+                conn.commit()
+            if "special_time_window" not in cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN special_time_window INTEGER")
+                conn.commit()
         except Exception:
             pass
         table_jobs = [
@@ -1441,6 +1449,8 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True, verify_after_cle
                 "project_amount_net",
                 "split_amount",
                 "hourly_schedule_json",
+                "play_time_window",
+                "special_time_window",
                 "region",
             ],
             write_orders_to_sheets,
@@ -1465,6 +1475,8 @@ def clear_business_tables_in_sheets(*, keep_users: bool = True, verify_after_cle
                 "project_amount_net",
                 "split_amount",
                 "hourly_schedule_json",
+                "play_time_window",
+                "special_time_window",
                 "region",
             ],
             write_orders_detail_to_sheets,
@@ -1568,6 +1580,8 @@ def clear_business_tables_in_sheets_with_report(
                 "project_amount_net",
                 "split_amount",
                 "hourly_schedule_json",
+                "play_time_window",
+                "special_time_window",
                 "region",
             ],
             write_orders_to_sheets,
@@ -1592,6 +1606,8 @@ def clear_business_tables_in_sheets_with_report(
                 "project_amount_net",
                 "split_amount",
                 "hourly_schedule_json",
+                "play_time_window",
+                "special_time_window",
                 "region",
             ],
             write_orders_detail_to_sheets,
@@ -1740,14 +1756,14 @@ def load_all_from_sheets_into_db(get_db_connection, init_db) -> list[str]:
                 try:
                     conn.execute("""
                         INSERT OR REPLACE INTO orders
-                        (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, region)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json, play_time_window, special_time_window, region)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         row.get("id"), row.get("platform"), row.get("client"), row.get("product"), row.get("sales"), row.get("company"),
                         row.get("start_date"), row.get("end_date"),
                         _int(row.get("seconds")), _int(row.get("spots")), _float(row.get("amount_net")), row.get("updated_at"),
                         row.get("contract_id"), row.get("seconds_type"), _float(row.get("project_amount_net")), _float(row.get("split_amount")),
-                        row.get("hourly_schedule_json"), row.get("region")
+                        row.get("hourly_schedule_json"), row.get("play_time_window"), _int(row.get("special_time_window")), row.get("region")
                     ))
                     conn.commit()
                 except Exception as e:

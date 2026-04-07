@@ -31,7 +31,7 @@ from services_ragic_import import _ragic_material_display_string
 TABLE1_BASE_COLUMNS = [
     "業務", "主管", "合約編號", "公司", "實收金額", "除佣實收", "專案實收金額", "拆分金額",
     "製作成本", "獎金%", "核定獎金", "加發獎金", "業務基金", "協力基金", "秒數用途", "提交日",
-    "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台",
+    "客戶名稱", "秒數", "素材", "起始日", "終止日", "走期天數", "區域", "媒體平台", "播出時段",
 ]
 TABLE1_HOUR_COLUMNS = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]]
 TABLE1_STAT_COLUMNS = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
@@ -105,6 +105,15 @@ def _preview_schedule_map_from_spots(spots: Any) -> dict[str, int]:
         if i > 2000:
             break
     return {str(h): int(v) for h, v in alloc.items() if v > 0}
+
+
+def _default_time_window_by_platform(platform_text: str) -> str:
+    s = str(platform_text or "")
+    if ("全家" in s and "廣播" in s) or ("企頻" in s):
+        return "07-23"
+    if "新鮮視" in s:
+        return "06-24"
+    return ""
 
 
 def _fill_preview_hour_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1067,6 +1076,11 @@ def render_ragic_test_tab(
                         "走期天數": days,
                         "區域": u.get("region") or "未知",
                         "媒體平台": u.get("platform") or PLACEHOLDER_MISSING,
+                        "播出時段": (
+                            f"{int(u.get('time_window_start')):02d}-{int(u.get('time_window_end')):02d}"
+                            if (u.get("time_window_start") is not None and u.get("time_window_end") is not None)
+                            else _default_time_window_by_platform(u.get("platform") or "")
+                        ),
                         "每天總檔次": daily_spots[0] if daily_spots else 0,
                         "委刊總檔數": total_spots,
                         "總秒數": total_spots * sec,
@@ -1116,6 +1130,13 @@ def render_ragic_test_tab(
     if not df_combined.empty:
         df_combined = _ensure_full_table1_columns(df_combined, placeholder=PLACEHOLDER_MISSING)
         df_combined = _fill_preview_hour_columns(df_combined)
+        if "播出時段" not in df_combined.columns:
+            df_combined["播出時段"] = ""
+        for idx, rr in df_combined.iterrows():
+            cur = str(rr.get("播出時段", "") or "").strip()
+            if cur:
+                continue
+            df_combined.at[idx, "播出時段"] = _default_time_window_by_platform(rr.get("媒體平台", ""))
         # 用 Ragic 欄位覆寫可解析的欄位（主管、實收金額、製作成本、獎金%、提交日等）
         for col, val in ragic_overrides.items():
             if col in df_combined.columns and val not in (None, ""):

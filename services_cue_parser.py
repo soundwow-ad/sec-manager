@@ -1917,7 +1917,11 @@ def parse_cue_excel_for_table1(
                     if ad_unit.get("allowed_hours"):
                         continue
                     sn = str(ad_unit.get("source_sheet") or "")
-                    ad_unit["allowed_hours"] = list(sheet_hours.get(sn, []))
+                    ah = list(sheet_hours.get(sn, []))
+                    ad_unit["allowed_hours"] = ah
+                    if ah:
+                        ad_unit["time_window_start"] = min(ah)
+                        ad_unit["time_window_end"] = max(ah) + 1
             except Exception:
                 pass
             if order_info:
@@ -2015,6 +2019,8 @@ def parse_cue_excel_for_table1(
                             "cue_sheet_company": cue_sheet_company,
                             "cue_sheet_sales": cue_sheet_sales,
                             "allowed_hours": allowed_hours,
+                            "time_window_start": time_window[0] if time_window else None,
+                            "time_window_end": time_window[1] if time_window else None,
                         }
                         if order_info:
                             ad_unit.update(
