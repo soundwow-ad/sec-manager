@@ -20,6 +20,24 @@ def render_sidebar_admin(
     save_platform_settings: Callable[[str, int, int], None],
     sync_sheets_if_enabled: Callable[..., object],
 ) -> None:
+    st.sidebar.markdown("### 🔗 相關連結")
+    st.sidebar.link_button(
+        "手動匯入資料 Google Sheet",
+        "https://docs.google.com/spreadsheets/d/1x2cboM_xmB7nl9aA12O633BzmvPNyJnZoqPipOQhVY4/edit?usp=sharing",
+        use_container_width=True,
+    )
+    st.sidebar.link_button(
+        "資料庫 Google Sheet",
+        "https://docs.google.com/spreadsheets/d/1q5oC-yZNXroHKZRBMln8Z0j3-D28U-78zKCdPKLOqC0/edit?usp=sharing",
+        use_container_width=True,
+    )
+    st.sidebar.link_button(
+        "客服專用 Google Sheet 分頁",
+        "https://docs.google.com/spreadsheets/d/1q5oC-yZNXroHKZRBMln8Z0j3-D28U-78zKCdPKLOqC0/edit?gid=1211360780#gid=1211360780",
+        use_container_width=True,
+    )
+    st.sidebar.markdown("---")
+
     st.sidebar.markdown("---")
     with st.sidebar.expander("☁️ Google Sheet 資料庫（簡易）", expanded=False):
         st.caption("只保留兩個核心動作：寫入（覆蓋 Sheet）與讀取（覆蓋本地 DB）。")
