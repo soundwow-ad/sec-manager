@@ -813,10 +813,32 @@ def _write_template_style_tabs(
             df_segments = df_segments.merge(sched_map, on="source_order_id", how="left")
         except Exception:
             pass
-    rows_o = _build_template_sheet_rows(df_orders, headers, source_type="orders", layout_meta=layout_meta)
+    # 客服專用：僅保留全家廣播/全家新鮮視
+    df_orders_cs = df_orders.copy() if df_orders is not None else pd.DataFrame()
+    if not df_orders_cs.empty:
+        def _is_fm_row(r) -> bool:
+            txt = " ".join(
+                [
+                    str(r.get("platform", "") or ""),
+                    str(r.get("media_platform", "") or ""),
+                    str(r.get("channel", "") or ""),
+                ]
+            )
+            return ("全家廣播" in txt) or ("企頻" in txt) or ("新鮮視" in txt)
+
+        try:
+            df_orders_cs = df_orders_cs[df_orders_cs.apply(_is_fm_row, axis=1)].copy()
+        except Exception:
+            pass
+
+    rows_o = _build_template_sheet_rows(df_orders_cs, headers, source_type="orders", layout_meta=layout_meta)
     rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments", layout_meta=layout_meta)
     values_o = _sanitize_sheet_matrix(layout_rows + rows_o)
     values_s = _sanitize_sheet_matrix(layout_rows + rows_s)
+
+    # 客服專用分頁僅保留 A~AU 欄（1-based 47 欄）
+    max_cols_cs = 47
+    values_o = [(row[:max_cols_cs] if isinstance(row, list) else row) for row in values_o]
 
     ws_o.clear()
     ws_s.clear()
