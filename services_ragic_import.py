@@ -15,7 +15,11 @@ import pandas as pd
 SECONDS_MGMT_REMARK_MAX = 60000
 HOUR_COLUMNS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]
 HOUR_PRIORITY = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
-PEAK_HOUR_CAPS = {7: 4, 8: 4, 11: 4, 12: 4, 17: 4, 18: 4}
+PEAK_WINDOW_CAPS = [
+    ({7, 8}, 4),    # 7~9（7~8 + 8~9）兩小時合計上限 4
+    ({11, 12}, 4),  # 11~13 兩小時合計上限 4
+    ({17, 18}, 4),  # 17~19 兩小時合計上限 4
+]
 NO_SCHEDULE_HOURS = {0, 1}
 
 
@@ -290,31 +294,49 @@ def _allocate_hourly_schedule(
     if not allowed:
         return {}
     per_row: dict[int, int] = {h: 0 for h in allowed}
+    prio_idx = {h: i for i, h in enumerate(allowed)}
+
+    def _blocked_by_peak_window(hh: int) -> bool:
+        for win_hours, cap in PEAK_WINDOW_CAPS:
+            if hh not in win_hours:
+                continue
+            for d in dates:
+                day_use = contract_day_hour_usage.get(str(d), {})
+                win_used = 0
+                for wh in win_hours:
+                    win_used += int(day_use.get(wh, 0)) + int(per_row.get(wh, 0))
+                # 本次若把 hh 再加 1，是否超過該窗口上限
+                if win_used + 1 > int(cap):
+                    return True
+        return False
+
     remain = int(spots_per_day)
     safety = 0
     while remain > 0 and safety < 2000:
         safety += 1
-        progressed = False
+        # 候選時段：先過濾「特殊時段上限」後，按同 CUE 現有使用量最少優先，
+        # 同分時才回到既定優先序，避免前幾個素材吃光熱門時段。
+        candidates: list[tuple[int, int, int]] = []
         for h in allowed:
-            blocked = False
-            cap = PEAK_HOUR_CAPS.get(h)
-            if cap is not None:
-                for d in dates:
-                    used = int(contract_day_hour_usage.get(str(d), {}).get(h, 0))
-                    if used + per_row.get(h, 0) >= cap:
-                        blocked = True
-                        break
-            if blocked:
+            if _blocked_by_peak_window(h):
                 continue
-            per_row[h] = per_row.get(h, 0) + 1
+            usage_score = 0
+            for d in dates:
+                usage_score += int(contract_day_hour_usage.get(str(d), {}).get(h, 0)) + int(per_row.get(h, 0))
+            candidates.append((usage_score, prio_idx.get(h, 999), h))
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            h_pick = candidates[0][2]
+            per_row[h_pick] = per_row.get(h_pick, 0) + 1
             remain -= 1
-            progressed = True
-            if remain <= 0:
-                break
-        if progressed:
             continue
-        # 全部受限時，退而求其次塞到目前最少的可播時段
-        best_h = min(allowed, key=lambda x: per_row.get(x, 0))
+        # 特殊區間受限時，退而求其次塞到其他時段（仍依優先序）
+        peak_hours_flat = set().union(*[wh for wh, _ in PEAK_WINDOW_CAPS])
+        non_peak = [h for h in allowed if h not in peak_hours_flat]
+        if non_peak:
+            best_h = min(non_peak, key=lambda x: (per_row.get(x, 0), prio_idx.get(x, 999)))
+        else:
+            best_h = min(allowed, key=lambda x: (per_row.get(x, 0), prio_idx.get(x, 999)))
         per_row[best_h] = per_row.get(best_h, 0) + 1
         remain -= 1
     for d in dates:
