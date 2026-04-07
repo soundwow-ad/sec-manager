@@ -79,7 +79,7 @@ SCOPES = [
 # 供同步失敗時顯示 _client() 無法連線的具體原因
 _last_client_error: str | None = None
 _last_table_signatures: dict[str, str] = {}
-_HOUR_PRIORITY_FALLBACK = [8, 16, 22, 12, 20, 10, 18, 13, 15, 9, 14, 21, 11, 17, 19, 0, 7, 6, 23, 1]
+_HOUR_PRIORITY_FALLBACK = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
 
 
 def get_last_client_error() -> str | None:

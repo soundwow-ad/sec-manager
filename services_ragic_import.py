@@ -14,8 +14,9 @@ import pandas as pd
 
 SECONDS_MGMT_REMARK_MAX = 60000
 HOUR_COLUMNS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]
-HOUR_PRIORITY = [8, 16, 22, 12, 20, 10, 18, 13, 15, 9, 14, 21, 11, 17, 19, 0, 7]
+HOUR_PRIORITY = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
 PEAK_HOUR_CAPS = {7: 4, 8: 4, 11: 4, 12: 4, 17: 4, 18: 4}
+NO_SCHEDULE_HOURS = {0, 1}
 
 
 def _log_ragic_import(
@@ -252,7 +253,7 @@ def _normalize_allowed_hours(hours: list[int] | None) -> list[int]:
             hh = int(h)
         except Exception:
             continue
-        if 0 <= hh <= 23 and hh not in out:
+        if 0 <= hh <= 23 and hh not in NO_SCHEDULE_HOURS and hh not in out:
             out.append(hh)
     return out
 
@@ -265,7 +266,7 @@ def _is_hour_schedule_target(platform_text: str) -> bool:
 def _hour_priority_for_allowed(allowed_hours: list[int]) -> list[int]:
     allowed = _normalize_allowed_hours(allowed_hours)
     if not allowed:
-        allowed = list(HOUR_COLUMNS)
+        allowed = [h for h in HOUR_COLUMNS if h not in NO_SCHEDULE_HOURS]
     ordered: list[int] = []
     for h in HOUR_PRIORITY:
         if h in allowed and h not in ordered:
