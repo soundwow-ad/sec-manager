@@ -284,7 +284,7 @@ def _default_allowed_hours_for_platform(platform_text: str) -> list[int]:
     if ("全家" in s and "廣播" in s) or ("企頻" in s):
         return list(range(7, 23))  # 07-23
     if "新鮮視" in s:
-        return list(range(6, 24))  # 06-24
+        return list(range(7, 23))  # 07-23（基礎設定表）
     return []
 
 

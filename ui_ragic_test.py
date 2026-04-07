@@ -112,7 +112,7 @@ def _default_time_window_by_platform(platform_text: str) -> str:
     if ("全家" in s and "廣播" in s) or ("企頻" in s):
         return "07-23"
     if "新鮮視" in s:
-        return "06-24"
+        return "07-23"
     return ""
 
 

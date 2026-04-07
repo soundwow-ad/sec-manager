@@ -115,26 +115,29 @@ def render_sidebar_admin(
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📝 平台設定")
-    with st.sidebar.expander("設定平台店數與營業時間"):
-        conn = get_db_connection()
-        platforms = pd.read_sql("SELECT DISTINCT platform FROM orders", conn)
-        conn.close()
+    st.sidebar.info(
+        "平台店數與基礎播出時段已改為自動讀取外部設定表：\n"
+        "https://docs.google.com/spreadsheets/d/1g36WdYPLQgWk20VkPN7cOmyTDAl3Lp8vFd_v4ptmRec/edit?usp=sharing\n"
+        "（Pricing / Stores 分頁）"
+    )
+    with st.sidebar.expander("🔎 設定來源檢查", expanded=False):
+        try:
+            from services_platform import get_external_settings_status
 
-        if not platforms.empty:
-            custom_settings = load_platform_settings()
-            sel_platform = st.selectbox("選擇平台", platforms["platform"].tolist())
-            current_store = get_store_count(sel_platform, custom_settings)
-            current_hours = platform_capacity.get(sel_platform, 18)
-            if custom_settings and sel_platform in custom_settings:
-                current_hours = custom_settings[sel_platform]["daily_hours"]
-
-            new_store = st.number_input("店數", min_value=1, value=int(current_store), step=1)
-            new_hours = st.number_input("每日營業小時數", min_value=1, max_value=24, value=int(current_hours), step=1)
-
-            if st.button("💾 儲存設定"):
-                save_platform_settings(sel_platform, new_store, new_hours)
-                st.success("設定已儲存！")
-                st.rerun()
-        else:
-            st.info("請先新增訂單或匯入資料")
+            st_status = get_external_settings_status()
+            if st_status.get("ok"):
+                st.success("外部設定表讀取成功")
+            else:
+                st.error("外部設定表讀取失敗或欄位不完整")
+            st.caption(f"檢查時間：{st_status.get('checked_at', '')}")
+            st.caption(f"Pricing 筆數：{st_status.get('pricing_rows', 0)}")
+            st.caption(f"Stores 筆數：{st_status.get('stores_rows', 0)}")
+            if st_status.get("missing_pricing_columns"):
+                st.caption(f"Pricing 缺欄：{', '.join(st_status.get('missing_pricing_columns', []))}")
+            if st_status.get("missing_stores_columns"):
+                st.caption(f"Stores 缺欄：{', '.join(st_status.get('missing_stores_columns', []))}")
+            if st_status.get("error"):
+                st.caption(f"錯誤訊息：{st_status.get('error')}")
+        except Exception as e:
+            st.error(f"設定來源檢查失敗：{e}")
 

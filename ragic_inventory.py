@@ -357,6 +357,13 @@ def get_store_count(platform, custom_settings=None):
     """取得平台店數（優先使用自訂設定，其次平台鍵，再依區域對照，最後預設 1）"""
     if custom_settings and platform in custom_settings:
         return custom_settings[platform]['store_count']
+    try:
+        _, _, region = parse_platform_region(platform)
+        rk = f"REGION:{region}"
+        if custom_settings and rk in custom_settings:
+            return int(custom_settings[rk].get("store_count") or 1)
+    except Exception:
+        pass
     if platform in STORE_COUNTS:
         return STORE_COUNTS[platform]
     # 依區域對照：新鮮視/企頻 等「平台名含區域」皆可由此取得店數
@@ -379,7 +386,15 @@ def get_daily_capacity(platform, custom_settings=None):
     if custom_settings and platform in custom_settings:
         daily_hours = custom_settings[platform]['daily_hours']
     else:
-        daily_hours = PLATFORM_CAPACITY.get(platform, 18)
+        try:
+            _, _, region = parse_platform_region(platform)
+            rk = f"REGION:{region}"
+            if custom_settings and rk in custom_settings:
+                daily_hours = custom_settings[rk]['daily_hours']
+            else:
+                daily_hours = PLATFORM_CAPACITY.get(platform, 18)
+        except Exception:
+            daily_hours = PLATFORM_CAPACITY.get(platform, 18)
     
     # 計算每日最大秒數容量
     return store_count * daily_hours * 3600
