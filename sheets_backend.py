@@ -53,8 +53,8 @@ WS_PLATFORM_SETTINGS = "PlatformSettings"
 WS_CAPACITY = "Capacity"
 WS_PURCHASE = "Purchase"
 WS_USERS = "Users"
-WS_T1_TEMPLATE_ORDERS = "表1樣式_Orders"
-WS_T1_TEMPLATE_SEGMENTS = "表1樣式_Segments"
+WS_T1_TEMPLATE_ORDERS = "客服專用"
+WS_T1_TEMPLATE_SEGMENTS = "表1樣式"
 
 ALL_WORKHEET_NAMES = [
     WS_ORDERS,
