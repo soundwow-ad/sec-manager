@@ -115,6 +115,12 @@ def _fill_preview_hour_columns(df: pd.DataFrame) -> pd.DataFrame:
     for h in TABLE1_HOUR_COLUMNS:
         if h not in out.columns:
             out[h] = ""
+    # 避免 string[pyarrow] 欄位在 Cloud 環境下不能直接寫入數字
+    for h in TABLE1_HOUR_COLUMNS:
+        try:
+            out[h] = out[h].astype("object")
+        except Exception:
+            pass
     for idx, row in out.iterrows():
         # 若已有任何時段值，視為已排程
         has_hour = False
@@ -145,7 +151,7 @@ def _fill_preview_hour_columns(df: pd.DataFrame) -> pd.DataFrame:
             schedule_map = _preview_schedule_map_from_spots(row.get("每天總檔次", 0))
         for h, v in schedule_map.items():
             if h in TABLE1_HOUR_COLUMNS and v > 0:
-                out.at[idx, h] = v
+                out.at[idx, h] = str(v)
     return out
 
 
