@@ -37,6 +37,7 @@ TABLE1_HOUR_COLUMNS = [str(h) for h in [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 
 TABLE1_STAT_COLUMNS = ["每天總檔次", "委刊總檔數", "總秒數", "店數", "使用總秒數"]
 PLACEHOLDER_MISSING = "無法判斷"
 PLACEHOLDER_NOT_AVAILABLE = "抓不到"
+HOUR_PRIORITY_PREVIEW = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
 # 多筆 Ragic 匯入佇列（Streamlit session_state）
 _RAGIC_IMPORT_QUEUE_KEY = "_ragic_import_queue"
 
@@ -84,6 +85,68 @@ def _normalize_cell(v: Any) -> str:
     if isinstance(v, dict):
         return json.dumps(v, ensure_ascii=False)[:200]
     return str(v).strip()
+
+
+def _preview_schedule_map_from_spots(spots: Any) -> dict[str, int]:
+    """測試頁預覽用：由每天總檔次快速推估時段分配（不使用 0/1 時段）。"""
+    try:
+        n = int(float(spots))
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return {}
+    alloc = {h: 0 for h in HOUR_PRIORITY_PREVIEW}
+    i = 0
+    while n > 0:
+        h = HOUR_PRIORITY_PREVIEW[i % len(HOUR_PRIORITY_PREVIEW)]
+        alloc[h] += 1
+        n -= 1
+        i += 1
+        if i > 2000:
+            break
+    return {str(h): int(v) for h, v in alloc.items() if v > 0}
+
+
+def _fill_preview_hour_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """補齊測試頁 6~1 欄位，優先用 hourly_schedule_json，否則由每天總檔次推估。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for h in TABLE1_HOUR_COLUMNS:
+        if h not in out.columns:
+            out[h] = ""
+    for idx, row in out.iterrows():
+        # 若已有任何時段值，視為已排程
+        has_hour = False
+        for h in TABLE1_HOUR_COLUMNS:
+            v = row.get(h, "")
+            if str(v).strip() not in ("", "0", "0.0", "nan", "None"):
+                has_hour = True
+                break
+        if has_hour:
+            continue
+        schedule_map: dict[str, int] = {}
+        raw = row.get("hourly_schedule_json", "")
+        try:
+            if isinstance(raw, str) and raw.strip():
+                j = json.loads(raw)
+                if isinstance(j, dict):
+                    for k, v in j.items():
+                        kk = str(k).strip().replace(".0", "")
+                        try:
+                            iv = int(float(v))
+                        except (TypeError, ValueError):
+                            continue
+                        if kk in TABLE1_HOUR_COLUMNS and iv > 0:
+                            schedule_map[kk] = iv
+        except Exception:
+            schedule_map = {}
+        if not schedule_map:
+            schedule_map = _preview_schedule_map_from_spots(row.get("每天總檔次", 0))
+        for h, v in schedule_map.items():
+            if h in TABLE1_HOUR_COLUMNS and v > 0:
+                out.at[idx, h] = v
+    return out
 
 
 def _flatten_entry(entry: dict, rev_id_to_name: dict[str, str]) -> list[dict]:
@@ -1046,6 +1109,7 @@ def render_ragic_test_tab(
 
     if not df_combined.empty:
         df_combined = _ensure_full_table1_columns(df_combined, placeholder=PLACEHOLDER_MISSING)
+        df_combined = _fill_preview_hour_columns(df_combined)
         # 用 Ragic 欄位覆寫可解析的欄位（主管、實收金額、製作成本、獎金%、提交日等）
         for col, val in ragic_overrides.items():
             if col in df_combined.columns and val not in (None, ""):
