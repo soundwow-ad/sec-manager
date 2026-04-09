@@ -855,8 +855,24 @@ def _write_template_style_tabs(
 
     ws_o.clear()
     ws_s.clear()
-    ws_o.update(values_o, value_input_option="USER_ENTERED")
+    # 客服專用時段欄容易受 Google Sheet 既有日期格式影響而顯示 1899/1900，
+    # 這裡改用 RAW，搭配時段值寫成字串，避免自動轉型成日期序號。
+    ws_o.update(values_o, value_input_option="RAW")
     ws_s.update(values_s, value_input_option="USER_ENTERED")
+    # 客服專用分頁全表置中（水平/垂直）
+    try:
+        total_rows = max(1, len(values_o))
+        total_cols = max(1, max((len(r) for r in values_o), default=1))
+        end_col = _col_to_a1(total_cols)
+        ws_o.format(
+            f"A1:{end_col}{total_rows}",
+            {
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+            },
+        )
+    except Exception:
+        pass
     return None
 
 
@@ -1306,7 +1322,7 @@ def _build_customer_service_rows(df_orders: pd.DataFrame) -> list[list[Any]]:
         hour_values = []
         for hv in hour_values_raw:
             sv = _normalize_spot_count(hv)
-            hour_values.append(sv if sv > 0 else "")
+            hour_values.append(str(sv) if sv > 0 else "")
         rows.append(
             [
                 submit_date,
