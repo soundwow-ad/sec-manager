@@ -1196,13 +1196,32 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 
 def _infer_region(platform: Any, region: Any) -> str:
+    alias = {
+        "高屏": "高高屏",
+        "高高屏": "高高屏",
+        "北區": "北北基",
+        "中區": "中彰投",
+        "東區": "宜花東",
+    }
     r = str(region or "").strip()
+    if r.lower() in ("nan", "none", "null"):
+        r = ""
     if r:
-        return r
+        return alias.get(r, r)
     p = str(platform or "")
+    try:
+        from services_media_platform import parse_platform_region as _parse_platform_region
+        _, _, rp = _parse_platform_region(p)
+        rp = str(rp or "").strip()
+        if rp and rp != "未知":
+            return alias.get(rp, rp)
+    except Exception:
+        pass
     for name in ["全省", "北北基", "桃竹苗", "中彰投", "高高屏", "雲嘉南", "宜花東"]:
         if name in p:
             return name
+    if ("全家廣播" in p) or ("企頻" in p) or ("新鮮視" in p):
+        return "全省"
     return ""
 
 
@@ -1220,6 +1239,8 @@ def _infer_store_count(platform: Any, region: Any) -> int:
     if reg in region_counts:
         return int(region_counts[reg])
     p = str(platform or "")
+    if "新鮮視" in p or "企頻" in p:
+        return int(region_counts.get("全省", 3124))
     if "全家廣播" in p:
         return 4200
     return 1
@@ -1233,6 +1254,23 @@ def _schedule_value(schedule_map: dict[str, Any], hour_header: str) -> int | str
             value = _to_int(schedule_map.get(key), default=0)
             return value if value > 0 else ""
     return ""
+
+
+def _normalize_spot_count(v: Any) -> int:
+    """
+    時段欄位僅允許「整數檔次」，避免 Excel 日期序號/日期字串污染。
+    """
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return 0
+        if "-" in s or ":" in s or "/" in s:
+            return 0
+    n = _to_int(v, default=0)
+    # 防呆：單時段檔次不該出現異常大值（常見是 Excel 日期序號）
+    if n < 0 or n > 100:
+        return 0
+    return n
 
 
 def _build_customer_service_rows(df_orders: pd.DataFrame) -> list[list[Any]]:
@@ -1264,7 +1302,11 @@ def _build_customer_service_rows(df_orders: pd.DataFrame) -> list[list[Any]]:
         if not schedule_map:
             schedule_map = _fallback_schedule_map_from_spots(daily_spots)
 
-        hour_values = [_schedule_value(schedule_map, h) for h in _CS_HOUR_HEADERS]
+        hour_values_raw = [_schedule_value(schedule_map, h) for h in _CS_HOUR_HEADERS]
+        hour_values = []
+        for hv in hour_values_raw:
+            sv = _normalize_spot_count(hv)
+            hour_values.append(sv if sv > 0 else "")
         rows.append(
             [
                 submit_date,
