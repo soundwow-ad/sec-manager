@@ -80,6 +80,23 @@ SCOPES = [
 _last_client_error: str | None = None
 _last_table_signatures: dict[str, str] = {}
 _HOUR_PRIORITY_FALLBACK = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
+_CS_HOUR_HEADERS = [f"{h:02d}" for h in list(range(6, 24)) + [0, 1]]
+_CS_EXPORT_HEADERS = [
+    "提交日",
+    "HYUNDAI_CUSTIN",
+    "秒數",
+    "素材",
+    "起始日",
+    "終止日",
+    "走期天數",
+    "區域",
+    *_CS_HOUR_HEADERS,
+    "每天總檔次",
+    "委刋總檔數",
+    "總秒數",
+    "店數",
+    "使用總秒數",
+]
 
 
 def get_last_client_error() -> str | None:
@@ -831,14 +848,10 @@ def _write_template_style_tabs(
         except Exception:
             pass
 
-    rows_o = _build_template_sheet_rows(df_orders_cs, headers, source_type="orders", layout_meta=layout_meta)
+    rows_o = _build_customer_service_rows(df_orders_cs)
     rows_s = _build_template_sheet_rows(df_segments, headers, source_type="segments", layout_meta=layout_meta)
-    values_o = _sanitize_sheet_matrix(layout_rows + rows_o)
+    values_o = _sanitize_sheet_matrix([_CS_EXPORT_HEADERS] + rows_o)
     values_s = _sanitize_sheet_matrix(layout_rows + rows_s)
-
-    # 客服專用分頁僅保留 A~AU 欄（1-based 47 欄）
-    max_cols_cs = 47
-    values_o = [(row[:max_cols_cs] if isinstance(row, list) else row) for row in values_o]
 
     ws_o.clear()
     ws_s.clear()
@@ -1161,6 +1174,116 @@ def _norm_date_text(v: str) -> str:
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return ""
+
+
+def _fmt_date_ymd_slash(v: Any) -> str:
+    try:
+        dt = pd.to_datetime(v, errors="coerce")
+        if pd.isna(dt):
+            return ""
+        return dt.strftime("%Y/%m/%d")
+    except Exception:
+        return ""
+
+
+def _to_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _infer_region(platform: Any, region: Any) -> str:
+    r = str(region or "").strip()
+    if r:
+        return r
+    p = str(platform or "")
+    for name in ["全省", "北北基", "桃竹苗", "中彰投", "高高屏", "雲嘉南", "宜花東"]:
+        if name in p:
+            return name
+    return ""
+
+
+def _infer_store_count(platform: Any, region: Any) -> int:
+    region_counts = {
+        "全省": 3124,
+        "北北基": 1127,
+        "桃竹苗": 616,
+        "中彰投": 528,
+        "高高屏": 405,
+        "雲嘉南": 365,
+        "宜花東": 83,
+    }
+    reg = _infer_region(platform, region)
+    if reg in region_counts:
+        return int(region_counts[reg])
+    p = str(platform or "")
+    if "全家廣播" in p:
+        return 4200
+    return 1
+
+
+def _schedule_value(schedule_map: dict[str, Any], hour_header: str) -> int | str:
+    hh = str(hour_header).zfill(2)
+    candidates = [hh, str(int(hh)), int(hh)]
+    for key in candidates:
+        if key in schedule_map:
+            value = _to_int(schedule_map.get(key), default=0)
+            return value if value > 0 else ""
+    return ""
+
+
+def _build_customer_service_rows(df_orders: pd.DataFrame) -> list[list[Any]]:
+    if df_orders is None or df_orders.empty:
+        return []
+    rows: list[list[Any]] = []
+    for _, r in df_orders.iterrows():
+        submit_date = _fmt_date_ymd_slash(r.get("updated_at", ""))
+        start_date = _fmt_date_ymd_slash(r.get("start_date", ""))
+        end_date = _fmt_date_ymd_slash(r.get("end_date", ""))
+        seconds = _to_int(r.get("seconds", 0), default=0)
+        daily_spots = _to_int(r.get("spots", 0), default=0)
+        days = _days_between(r.get("start_date"), r.get("end_date")) or 0
+        total_spots = daily_spots * days
+        total_seconds = seconds * total_spots
+        region = _infer_region(r.get("platform", ""), r.get("region", ""))
+        store_count = _infer_store_count(r.get("platform", ""), region)
+        total_store_seconds = total_seconds * store_count
+
+        schedule_map: dict[str, Any] = {}
+        try:
+            raw_sched = r.get("hourly_schedule_json", "")
+            if isinstance(raw_sched, str) and raw_sched.strip():
+                parsed = json.loads(raw_sched)
+                if isinstance(parsed, dict):
+                    schedule_map = parsed
+        except Exception:
+            schedule_map = {}
+        if not schedule_map:
+            schedule_map = _fallback_schedule_map_from_spots(daily_spots)
+
+        hour_values = [_schedule_value(schedule_map, h) for h in _CS_HOUR_HEADERS]
+        rows.append(
+            [
+                submit_date,
+                str(r.get("client", "") or ""),
+                seconds,
+                str(r.get("product", "") or ""),
+                start_date,
+                end_date,
+                days,
+                region,
+                *hour_values,
+                daily_spots,
+                total_spots,
+                total_seconds,
+                store_count,
+                f"{int(total_store_seconds):,}" if total_store_seconds > 0 else "",
+            ]
+        )
+    return rows
 
 
 def update_source_sheet_seconds_type(
