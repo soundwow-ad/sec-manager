@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 from datetime import datetime
 from typing import Callable
 
 import pandas as pd
 import requests
+
+HOUR_COLUMNS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]
+HOUR_PRIORITY = [8, 16, 20, 12, 10, 14, 18, 22, 7, 9, 11, 13, 15, 17, 19, 21, 23, 6]
 
 
 def _norm_text(v) -> str:
@@ -39,12 +43,14 @@ def _signature_from_existing_row(r: dict, effective_seconds_type: str) -> tuple:
         _norm_text(effective_seconds_type),
         _norm_num(r.get("project_amount_net", 0)),
         _norm_num(r.get("split_amount", 0)),
+        _norm_text(r.get("hourly_schedule_json", "")),
     )
 
 
 def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
     project_val = t[14] if len(t) > 14 else None
     split_val = None
+    schedule_val = t[15] if len(t) > 15 else ""
     return (
         _norm_text(t[1]),
         _norm_text(t[2]),
@@ -60,7 +66,56 @@ def _signature_from_tuple(t: tuple, effective_seconds_type: str) -> tuple:
         _norm_text(effective_seconds_type),
         _norm_num(project_val),
         _norm_num(split_val),
+        _norm_text(schedule_val),
     )
+
+
+def _to_int(v, default=0) -> int:
+    try:
+        if v is None:
+            return default
+        s = str(v).strip()
+        if s == "" or s.lower() in ("nan", "none", "null"):
+            return default
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def _fallback_schedule_map_from_spots(spots: int) -> dict[str, int]:
+    n = _to_int(spots, default=0)
+    if n <= 0:
+        return {}
+    alloc: dict[int, int] = {h: 0 for h in HOUR_PRIORITY}
+    idx = 0
+    while n > 0:
+        h = HOUR_PRIORITY[idx % len(HOUR_PRIORITY)]
+        alloc[h] = int(alloc.get(h, 0)) + 1
+        n -= 1
+        idx += 1
+        if idx > 5000:
+            break
+    return {str(h): int(v) for h, v in alloc.items() if int(v) > 0}
+
+
+def _build_hourly_schedule_json(row, spots: int) -> str:
+    schedule: dict[str, int] = {}
+    for h in HOUR_COLUMNS:
+        candidates = [str(h), f"{h:02d}"]
+        val = None
+        for key in candidates:
+            if key in row.index:
+                val = row.get(key)
+                if val is not None and str(val).strip() not in ("", "nan", "None", "null"):
+                    break
+        n = _to_int(val, default=0)
+        if n > 0:
+            schedule[str(h)] = n
+    if not schedule:
+        schedule = _fallback_schedule_map_from_spots(spots)
+    if not schedule:
+        return ""
+    return json.dumps(schedule, ensure_ascii=False, separators=(",", ":"))
 
 
 def normalize_date(val) -> str:
@@ -146,6 +201,7 @@ def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable
         spots = int(float(get("spots") or get("每天總檔次") or get("委刊總檔數") or get("委刋總檔數") or 0))
     except (ValueError, TypeError):
         spots = 0
+    hourly_schedule_json = _build_hourly_schedule_json(row, spots)
     try:
         amount_net = float(get("amount_net") or get("實收金額") or 0)
     except (ValueError, TypeError):
@@ -229,6 +285,7 @@ def sheet_row_to_order(row, row_index, col_map, normalize_seconds_type: Callable
         contract_id or None,
         seconds_type or "",
         project_amount_net,
+        hourly_schedule_json,
     )
 
 
@@ -343,10 +400,17 @@ def import_google_sheet_to_orders_service(
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
+            if "hourly_schedule_json" not in cols:
+                c.execute("ALTER TABLE orders ADD COLUMN hourly_schedule_json TEXT")
+                conn.commit()
+        except Exception:
+            pass
         existing_rows: dict[str, dict] = {}
         df_existing = pd.read_sql(
             """
-            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount
+            SELECT id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json
             FROM orders
             """,
             conn,
@@ -365,6 +429,7 @@ def import_google_sheet_to_orders_service(
         # 且若匯入列 seconds_type 為空，保留既有 seconds_type（避免覆蓋人工修正）。
         for t in orders:
             project_val = t[14] if len(t) > 14 else None
+            schedule_val = t[15] if len(t) > 15 else ""
             oid = _norm_text(t[0])
             old_row = existing_rows.get(oid)
             old_seconds_type = _norm_text((old_row or {}).get("seconds_type", ""))
@@ -384,8 +449,8 @@ def import_google_sheet_to_orders_service(
             c.execute(
                 """
                 INSERT INTO orders
-                (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                (id, platform, client, product, sales, company, start_date, end_date, seconds, spots, amount_net, updated_at, contract_id, seconds_type, project_amount_net, split_amount, hourly_schedule_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     platform=excluded.platform,
                     client=excluded.client,
@@ -404,7 +469,8 @@ def import_google_sheet_to_orders_service(
                         ELSE excluded.seconds_type
                     END,
                     project_amount_net=excluded.project_amount_net,
-                    split_amount=excluded.split_amount
+                    split_amount=excluded.split_amount,
+                    hourly_schedule_json=excluded.hourly_schedule_json
                 WHERE
                     COALESCE(orders.platform, '') != COALESCE(excluded.platform, '')
                     OR COALESCE(orders.client, '') != COALESCE(excluded.client, '')
@@ -426,8 +492,9 @@ def import_google_sheet_to_orders_service(
                     )
                     OR COALESCE(orders.project_amount_net, 0) != COALESCE(excluded.project_amount_net, 0)
                     OR COALESCE(orders.split_amount, 0) != COALESCE(excluded.split_amount, 0)
+                    OR COALESCE(orders.hourly_schedule_json, '') != COALESCE(excluded.hourly_schedule_json, '')
                 """,
-                (*t[:14], project_val, None),
+                (*t[:14], project_val, None, schedule_val),
             )
         conn.commit()
         conn.close()
